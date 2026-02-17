@@ -671,135 +671,307 @@ if 'data' in st.session_state:
         st.subheader("📑 Expert Deep Dive")
         
         # A. Company Profile
-        st.markdown(f"### 🏢 Company Profile: {focus_company['metrics'].get('Profile', {}).get('Summary', '')[:100]}...")
-        
         prof = focus_company['metrics'].get('Profile', {})
+        summary_snippet = prof.get('Summary', '')[:120]
+        st.markdown(f"### 🏢 {focus_ticker} — {prof.get('Sector', '')} / {prof.get('Industry', '')}")
         
-        p_c1, p_c2, p_c3 = st.columns(3)
+        p_c1, p_c2, p_c3, p_c4 = st.columns(4)
         with p_c1:
-            st.markdown(f"**Sector**: {prof.get('Sector', 'N/A')}")
-            st.markdown(f"**Industry**: {prof.get('Industry', 'N/A')}")
+            st.markdown(f"**Sector**")
+            st.caption(prof.get('Sector', 'N/A'))
         with p_c2:
-            st.markdown(f"**Employees**: {prof.get('Employees', 'N/A')}")
-            st.markdown(f"**HQ**: {prof.get('City', '')}, {prof.get('Country', '')}")
+            st.markdown(f"**Industry**")
+            st.caption(prof.get('Industry', 'N/A'))
         with p_c3:
-            web = prof.get('Website', '#')
-            st.markdown(f"**Website**: [{web}]({web})")
+            emp = prof.get('Employees', 'N/A')
+            st.markdown(f"**Employees**")
+            st.caption(f"{emp:,}" if isinstance(emp, (int, float)) else str(emp))
+        with p_c4:
+            st.markdown(f"**HQ**")
+            st.caption(f"{prof.get('City', '')}, {prof.get('Country', '')}")
+        
+        web = prof.get('Website', '')
+        if web:
+            st.markdown(f"🌐 [{web}]({web})")
             
-        with st.expander("Full Business Summary", expanded=False):
+        with st.expander("📄 Full Business Summary", expanded=False):
             st.write(prof.get('Summary', 'No summary available.'))
             
         st.divider()
         
-        # B. Governance & Risk Scorecard
-        st.markdown("### 🏛️ Governance & Risk")
-        gov_cols = st.columns(4)
+        # B. Governance & Risk Scorecard (Enhanced)
+        st.markdown("### 🏛️ Governance & Risk Scorecard")
+        st.caption("Risk scores range from **1 (low risk)** to **10 (high risk)**. Scores are sourced from Yahoo Finance's ISS governance analytics. Lower is better.")
         
-        # Focus Company Risk Profile
         m = focus_company['metrics']
         
-        with gov_cols[0]:
-            st.metric("Audit Risk", m.get('Audit Risk', 'N/A'))
-            st.metric("Board Risk", m.get('Board Risk', 'N/A'))
-        with gov_cols[1]:
-            st.metric("Comp. Risk", m.get('Compensation Risk', 'N/A'))
-            st.metric("Shareholder Risk", m.get('Shareholder Rights Risk', 'N/A'))
-        with gov_cols[2]:
-            st.metric("Inst. Ownership", f"{m.get('Inst. Ownership %', 0)}%")
-            st.metric("Insider Ownership", f"{m.get('Insider Ownership %', 0)}%")
-        with gov_cols[3]:
-             st.metric("Beta", m.get('Beta', 0))
+        def risk_color(val):
+            """Return emoji indicator based on risk score (1-10)."""
+            try:
+                v = float(val)
+                if v <= 3: return "🟢"
+                elif v <= 6: return "🟡"
+                else: return "🔴"
+            except: return "⚪"
+        
+        def risk_label(val):
+            """Return text label for risk score."""
+            try:
+                v = float(val)
+                if v <= 3: return "Low"
+                elif v <= 6: return "Moderate"
+                else: return "High"
+            except: return "N/A"
+        
+        # Risk scores in a clear grid
+        risk_items = [
+            ("Audit Risk", m.get('Audit Risk', 'N/A'), "Risk that financial reporting may be inaccurate or non-compliant"),
+            ("Board Risk", m.get('Board Risk', 'N/A'), "Risk related to board composition, independence, and oversight"),
+            ("Compensation Risk", m.get('Compensation Risk', 'N/A'), "Risk from executive pay misalignment with shareholder interests"),
+            ("Shareholder Rights Risk", m.get('Shareholder Rights Risk', 'N/A'), "Risk that shareholder voting rights and protections are weak"),
+        ]
+        
+        gov_cols = st.columns(4)
+        for idx, (label, val, tooltip) in enumerate(risk_items):
+            with gov_cols[idx]:
+                indicator = risk_color(val)
+                st.markdown(f"**{indicator} {label}**")
+                st.markdown(f"### {val} / 10")
+                st.caption(f"_{risk_label(val)} risk_ — {tooltip}")
+        
+        # Overall governance score
+        try:
+            gov_score = m.get('Overall Governance Risk', None)
+            if gov_score is not None:
+                st.markdown(f"**Overall Governance Risk**: {risk_color(gov_score)} **{gov_score}** / 10 — _{risk_label(gov_score)} overall governance risk_")
+        except: pass
+        
+        st.markdown("")
+        
+        # Ownership structure
+        own_c1, own_c2, own_c3 = st.columns(3)
+        with own_c1:
+            inst = m.get('Inst. Ownership %', 0)
+            st.metric("Institutional Ownership", f"{inst}%", help="% of shares held by large institutions (mutual funds, pension funds, etc.)")
+        with own_c2:
+            insider = m.get('Insider Ownership %', 0)
+            st.metric("Insider Ownership", f"{insider}%", help="% of shares held by executives and board members — high insider ownership can signal alignment with shareholders")
+        with own_c3:
+            beta = m.get('Beta', 0)
+            beta_label = "Higher than market" if beta > 1 else "Lower than market" if beta < 1 else "Market-level"
+            st.metric("Beta (Volatility)", f"{beta}", help=f"Measures stock volatility vs. market. Beta=1 means market-average. {beta_label} volatility.")
              
         st.divider()
 
-        # C. Capital Allocation Bridge (Cash Flow)
-        st.markdown(f"### 🌉 Capital Allocation Bridge (Last Fiscal Year): {focus_ticker}")
+        # C. Capital Allocation Bridge (Cash Flow) — Fixed for negative OCF
+        st.markdown(f"### 🌉 Capital Allocation Bridge: {focus_ticker}")
+        st.caption("How the company allocates its operating cash flow across investments, distributions, and M&A.")
         
-        # Get raw CF data for bridge
         try:
             cf = focus_company['raw_data']['financials']['annual']['cash_flow']
             
-            # Helper to get latest absolute value
-            def get_latest_abs(key):
-                val = 0
-                if key in cf:
-                    # Get first value
-                     val = list(cf[key].values())[0] if cf[key] else 0
-                return val
+            def get_latest_val(key):
+                """Get latest year value from cash flow dict."""
+                if key in cf and cf[key]:
+                    return list(cf[key].values())[0]
+                return 0
 
-            ocf = get_latest_abs("Operating Cash Flow")
-            capex = get_latest_abs("Capital Expenditure") # Usually negative
-            div = get_latest_abs("Cash Dividends Paid") # Usually negative
-            buyback = get_latest_abs("Repurchase Of Capital Stock") # Usually negative
-            acq = get_latest_abs("Net Business Purchase And Sale") # usually negative
+            ocf = get_latest_val("Operating Cash Flow")
+            capex = get_latest_val("Capital Expenditure")
+            div = get_latest_val("Cash Dividends Paid")
+            buyback = get_latest_val("Repurchase Of Capital Stock")
+            acq = get_latest_val("Net Business Purchase And Sale")
             
-            # Waterfall
-            fig_bridge = go.Figure(go.Waterfall(
-                name = "20", orientation = "v",
-                measure = ["absolute", "relative", "relative", "relative", "relative", "total"],
-                x = ["Operating Cash Flow", "Capex", "Dividends", "Buybacks", "M&A", "Remaining Cash Gen"],
-                textposition = "outside",
-                # Note: Capex/Divs/Buybacks are usually negative in Yahoo data.
-                # If they are positive, we invert them for the bridge logic (Uses of Cash)
-                y = [ocf, capex, div, buyback, acq, 0],
-                connector = {"line":{"color":"rgb(63, 63, 63)"}},
-            ))
+            # Compute remaining
+            remaining = ocf + capex + div + buyback + acq  # capex/div/buyback are usually negative
             
-            fig_bridge.update_layout(title = "Cash Flow Allocation Waterfall", showlegend = True, height=500)
-            st.plotly_chart(fig_bridge, use_container_width=True)
+            if ocf < 0:
+                # When OCF is negative, show a simple bar chart instead of waterfall
+                # because waterfall doesn't make intuitive sense with a negative starting point
+                st.warning(f"⚠️ Operating Cash Flow is **negative** (${ocf/1e9:.2f}B). The company burned cash from operations this period.")
+                
+                cf_items = {
+                    "Operating CF": ocf,
+                    "Capex": capex,
+                    "Dividends": div,
+                    "Buybacks": buyback,
+                    "M&A": acq,
+                }
+                # Filter out zero items
+                cf_items = {k: v for k, v in cf_items.items() if v != 0}
+                
+                fig_cf = px.bar(
+                    x=list(cf_items.keys()), y=[v/1e9 for v in cf_items.values()],
+                    title="Cash Flow Components ($B)",
+                    color=[v > 0 for v in cf_items.values()],
+                    color_discrete_map={True: "#4ade80", False: "#f87171"},
+                    labels={"x": "", "y": "$ Billions", "color": ""},
+                )
+                fig_cf.update_layout(
+                    showlegend=False, height=400,
+                    paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+                    yaxis=dict(showgrid=True, gridcolor='rgba(255,255,255,0.08)'),
+                )
+                fig_cf.update_traces(text=[f"${v/1e9:.1f}B" for v in cf_items.values()], textposition="outside")
+                st.plotly_chart(fig_cf, use_container_width=True)
+            else:
+                # Normal waterfall for positive OCF
+                labels = ["Operating Cash Flow"]
+                values = [ocf / 1e9]
+                measures = ["absolute"]
+                
+                if capex != 0:
+                    labels.append("Capex")
+                    values.append(capex / 1e9)
+                    measures.append("relative")
+                if div != 0:
+                    labels.append("Dividends")
+                    values.append(div / 1e9)
+                    measures.append("relative")
+                if buyback != 0:
+                    labels.append("Buybacks")
+                    values.append(buyback / 1e9)
+                    measures.append("relative")
+                if acq != 0:
+                    labels.append("M&A")
+                    values.append(acq / 1e9)
+                    measures.append("relative")
+                    
+                labels.append("Remaining")
+                values.append(0)
+                measures.append("total")
+                
+                fig_bridge = go.Figure(go.Waterfall(
+                    orientation="v",
+                    measure=measures,
+                    x=labels,
+                    y=values,
+                    textposition="outside",
+                    text=[f"${v:.1f}B" for v in values[:-1]] + [f"${remaining/1e9:.1f}B"],
+                    connector={"line": {"color": "rgba(255,255,255,0.2)"}},
+                    increasing={"marker": {"color": "#4ade80"}},
+                    decreasing={"marker": {"color": "#f87171"}},
+                    totals={"marker": {"color": "#60a5fa"}},
+                ))
+                
+                fig_bridge.update_layout(
+                    title="Cash Flow Allocation Waterfall ($B)",
+                    showlegend=False,
+                    height=450,
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    yaxis=dict(showgrid=True, gridcolor='rgba(255,255,255,0.08)', title="$ Billions"),
+                    xaxis=dict(showgrid=False),
+                )
+                st.plotly_chart(fig_bridge, use_container_width=True)
             
         except Exception as e:
             st.warning(f"Could not build Capital Allocation Bridge: {e}")
 
         st.divider()
 
-        # D. Sparklines (Trends)
-        st.markdown("### 📈 3-Year Trends")
+        # D. Multi-Year Trends (Proper Line Charts)
+        st.markdown("### 📈 Multi-Year Financial Trends")
+        st.caption("Revenue, EBITDA, and Net Income trajectories for all companies in the cohort.")
         
-        trend_data = []
-        for c in companies:
-            ticker = c['ticker']
-            raw = c.get('raw_data', {}).get('financials', {}).get('annual', {})
-            inc = raw.get('income_statement', {})
-            
-            def get_trend(data_dict, key):
-                if not data_dict or key not in data_dict: return [0,0,0]
-                series = data_dict[key]
-                # Sort by date ascending to show trend left-to-right
-                sorted_dates = sorted(series.keys())
-                # Take last 5 years max
-                vals = [series[d] for d in sorted_dates][-5:]
-                return vals
-            
-            # Try to find revenue key
-            rev_key = next((k for k in ["Total Revenue", "TotalRevenue", "Operating Revenue", "Revenue"] if k in inc), None)
-            ebitda_key = next((k for k in ["EBITDA", "Normalized EBITDA"] if k in inc), None)
-            ni_key = next((k for k in ["Net Income", "NetIncome"] if k in inc), None)
-            
-            trend_data.append({
-                "Ticker": ticker,
-                "Revenue Trend": get_trend(inc, rev_key),
-                "EBITDA Trend": get_trend(inc, ebitda_key),
-                "Net Income Trend": get_trend(inc, ni_key)
-            })
-            
-        df_trends = pd.DataFrame(trend_data)
+        def extract_annual_series(company, statement, key_options):
+            """Extract a time series from a company's financial statements."""
+            raw = company.get('raw_data', {}).get('financials', {}).get('annual', {})
+            stmt = raw.get(statement, {})
+            key = next((k for k in key_options if k in stmt), None)
+            if not key or not stmt[key]:
+                return {}
+            return stmt[key]
         
-        st.dataframe(
-            df_trends,
-            column_config={
-                "Revenue Trend": st.column_config.LineChartColumn("Revenue (5y)", y_min=0, width="medium"),
-                "EBITDA Trend": st.column_config.LineChartColumn("EBITDA (5y)", width="medium"),
-                "Net Income Trend": st.column_config.LineChartColumn("Net Income (5y)", width="medium")
-            },
-            use_container_width=True,
-            hide_index=True
-        )
+        trend_metrics = [
+            ("Revenue", "income_statement", ["Total Revenue", "TotalRevenue", "Operating Revenue", "Revenue"]),
+            ("EBITDA", "income_statement", ["EBITDA", "Normalized EBITDA"]),
+            ("Net Income", "income_statement", ["Net Income", "NetIncome"]),
+        ]
+        
+        trend_cols = st.columns(len(trend_metrics))
+        
+        for t_idx, (metric_label, stmt_name, key_opts) in enumerate(trend_metrics):
+            with trend_cols[t_idx]:
+                fig_trend = go.Figure()
+                
+                for c in companies:
+                    series = extract_annual_series(c, stmt_name, key_opts)
+                    if series:
+                        sorted_dates = sorted(series.keys())
+                        dates = sorted_dates[-5:]  # last 5 years
+                        vals = [series[d] / 1e9 for d in dates]  # Convert to billions
+                        # Use year labels
+                        years = [d[:4] if len(d) >= 4 else d for d in dates]
+                        
+                        fig_trend.add_trace(go.Scatter(
+                            x=years, y=vals,
+                            mode='lines+markers',
+                            name=c['ticker'],
+                            line=dict(width=3 if c['ticker'] == focus_ticker else 1.5),
+                            opacity=1.0 if c['ticker'] == focus_ticker else 0.5,
+                        ))
+                
+                fig_trend.update_layout(
+                    title=f"{metric_label} ($B)",
+                    height=300,
+                    margin=dict(l=0, r=0, t=40, b=0),
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    yaxis=dict(showgrid=True, gridcolor='rgba(255,255,255,0.08)'),
+                    xaxis=dict(showgrid=False),
+                    legend=dict(font=dict(size=10), orientation="h", y=-0.2),
+                    showlegend=(t_idx == 0),  # Only show legend on first chart
+                )
+                st.plotly_chart(fig_trend, use_container_width=True)
 
-        # E. Full Metrics Table
-        st.markdown("### 📋 Detailed Metrics")
-        full_df = pd.json_normalize([{'Ticker': c['ticker'], **c['metrics']} for c in companies]).set_index("Ticker")
-        st.dataframe(full_df.style.background_gradient(cmap="viridis"), use_container_width=True)
+        st.divider()
+        
+        # E. Detailed Metrics (Categorized Cards)
+        st.markdown(f"### 📋 All Metrics: {focus_ticker}")
+        st.caption("Complete breakdown of all computed metrics, organized by category.")
+        
+        m = focus_company['metrics']
+        
+        # Categorize metrics
+        metric_categories = {
+            "📈 Growth": ["Revenue ($B)", "Revenue CAGR (3y)", "EBITDA CAGR (3y)"],
+            "💰 Profitability": ["Gross Margin %", "EBITDA Margin %", "Net Margin %", "Operating Margin %"],
+            "💧 Liquidity": ["Current Ratio", "Quick Ratio", "Cash Ratio", "CCC (Days)", "DIO (Days)", "DSO (Days)", "DPO (Days)"],
+            "🏗️ Solvency": ["Net Debt / EBITDA", "Interest Coverage", "Debt / Equity", "Financial Leverage"],
+            "⚙️ Efficiency": ["Asset Turnover", "Fixed Asset Turnover", "ROIC %", "ROE %", "ROA %"],
+            "🎯 Returns & Valuation": ["Dupont ROE", "Shareholder Yield %", "EV / EBITDA", "P/E", "P/B", "Dividend Yield %"],
+        }
+        
+        # Compute cohort averages for comparison
+        cohort_avgs = {}
+        for metric_list in metric_categories.values():
+            for met in metric_list:
+                vals = [c['metrics'].get(met, None) for c in companies if c['metrics'].get(met) is not None]
+                if vals:
+                    cohort_avgs[met] = np.mean(vals)
+        
+        for cat_name, cat_metrics in metric_categories.items():
+            with st.expander(cat_name, expanded=True):
+                n_cols = min(len(cat_metrics), 4)
+                cols = st.columns(n_cols)
+                for m_idx, met in enumerate(cat_metrics):
+                    with cols[m_idx % n_cols]:
+                        val = m.get(met, None)
+                        avg = cohort_avgs.get(met, None)
+                        
+                        if val is not None and avg is not None:
+                            diff = val - avg
+                            # Format delta string
+                            if abs(val) > 100:
+                                delta_str = f"{diff:+,.0f} vs avg"
+                            else:
+                                delta_str = f"{diff:+.2f} vs avg"
+                            st.metric(met, f"{val:,.2f}" if isinstance(val, float) else str(val), delta=delta_str, delta_color="normal")
+                        elif val is not None:
+                            st.metric(met, f"{val:,.2f}" if isinstance(val, float) else str(val))
+                        else:
+                            st.metric(met, "—")
 
 
 
