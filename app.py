@@ -416,106 +416,113 @@ if 'data' in st.session_state:
                             st.caption(f"Source: {f['source']}")
         
         else:
-            # --- Gauge View (Industry Benchmark style) ---
-            # Metrics where LOWER is better (inverted color logic)
+            # --- Gauge View (Industry Benchmark style — Premium) ---
             lower_is_better = {"CCC (Days)", "DIO (Days)", "DSO (Days)", 
                                "Net Debt / EBITDA", "Debt / Equity", "Financial Leverage"}
             
-            cols = st.columns(3)
-            for i, metric in enumerate(metrics_to_show):
-                col = cols[i % 3]
-                with col:
-                    # Get focus company value
-                    focus_val = focus_company['metrics'].get(metric, 0)
-                    if focus_val is None: focus_val = 0
-                    
-                    # Get cohort values for range and average
-                    cohort_vals = [c['metrics'].get(metric, 0) for c in companies]
-                    cohort_vals = [v for v in cohort_vals if v is not None]
-                    if not cohort_vals:
-                        cohort_vals = [0]
-                    
-                    cohort_avg = np.mean(cohort_vals)
-                    cohort_min = min(cohort_vals)
-                    cohort_max = max(cohort_vals)
-                    
-                    # Build dynamic range with some padding
-                    range_pad = max(abs(cohort_max - cohort_min) * 0.3, abs(cohort_avg) * 0.2, 0.5)
-                    gauge_min = min(cohort_min, focus_val) - range_pad
-                    gauge_max = max(cohort_max, focus_val) + range_pad
-                    
-                    # For ratio metrics that should start at 0
-                    if "Ratio" in metric or "Turnover" in metric or "Coverage" in metric:
-                        gauge_min = max(0, gauge_min)
-                    
-                    delta_val = focus_val - cohort_avg
-                    
-                    # Color steps based on whether higher or lower is better
-                    if metric in lower_is_better:
-                        bar_color = "#4ade80" if focus_val <= cohort_avg else "#f87171"
-                        steps = [
-                            {"range": [gauge_min, gauge_min + (gauge_max - gauge_min) * 0.33], "color": "rgba(74, 222, 128, 0.25)"},
-                            {"range": [gauge_min + (gauge_max - gauge_min) * 0.33, gauge_min + (gauge_max - gauge_min) * 0.66], "color": "rgba(250, 204, 21, 0.25)"},
-                            {"range": [gauge_min + (gauge_max - gauge_min) * 0.66, gauge_max], "color": "rgba(248, 113, 113, 0.25)"},
-                        ]
-                    else:
-                        bar_color = "#4ade80" if focus_val >= cohort_avg else "#f87171"
-                        steps = [
-                            {"range": [gauge_min, gauge_min + (gauge_max - gauge_min) * 0.33], "color": "rgba(248, 113, 113, 0.25)"},
-                            {"range": [gauge_min + (gauge_max - gauge_min) * 0.33, gauge_min + (gauge_max - gauge_min) * 0.66], "color": "rgba(250, 204, 21, 0.25)"},
-                            {"range": [gauge_min + (gauge_max - gauge_min) * 0.66, gauge_max], "color": "rgba(74, 222, 128, 0.25)"},
-                        ]
-                    
-                    # Format number for display
-                    if abs(focus_val) >= 100:
-                        num_fmt = f"{focus_val:,.0f}"
-                    elif abs(focus_val) >= 1:
-                        num_fmt = f"{focus_val:.2f}"
-                    else:
-                        num_fmt = f"{focus_val:.3f}"
-                    
-                    fig = go.Figure(go.Indicator(
-                        mode="gauge+number+delta",
-                        value=focus_val,
-                        title={"text": f"<b>{metric}</b><br><span style='font-size:11px;color:gray'>{focus_ticker}</span>", "font": {"size": 14}},
-                        number={"font": {"size": 28}},
-                        delta={
-                            "reference": cohort_avg,
-                            "relative": False,
-                            "valueformat": ".2f",
-                            "increasing": {"color": "#4ade80" if metric not in lower_is_better else "#f87171"},
-                            "decreasing": {"color": "#f87171" if metric not in lower_is_better else "#4ade80"},
-                            "suffix": " vs avg",
-                            "font": {"size": 12}
-                        },
-                        gauge={
-                            "axis": {"range": [gauge_min, gauge_max], "tickfont": {"size": 10}},
-                            "bar": {"color": bar_color, "thickness": 0.3},
-                            "bgcolor": "rgba(0,0,0,0)",
-                            "borderwidth": 0,
-                            "steps": steps,
-                            "threshold": {
-                                "line": {"color": "#f97316", "width": 3},
-                                "thickness": 0.8,
-                                "value": cohort_avg
+            # 2 columns for more breathing room
+            for row_start in range(0, len(metrics_to_show), 2):
+                row_metrics = metrics_to_show[row_start:row_start + 2]
+                gauge_cols = st.columns(len(row_metrics))
+                
+                for g_idx, metric in enumerate(row_metrics):
+                    with gauge_cols[g_idx]:
+                        # Get focus company value
+                        focus_val = focus_company['metrics'].get(metric, 0)
+                        if focus_val is None: focus_val = 0
+                        
+                        # Get cohort values for range and average
+                        cohort_vals = [c['metrics'].get(metric, 0) for c in companies]
+                        cohort_vals = [v for v in cohort_vals if v is not None]
+                        if not cohort_vals: cohort_vals = [0]
+                        
+                        cohort_avg = np.mean(cohort_vals)
+                        cohort_min = min(cohort_vals)
+                        cohort_max = max(cohort_vals)
+                        
+                        # Dynamic range with padding
+                        spread = abs(cohort_max - cohort_min)
+                        range_pad = max(spread * 0.3, abs(cohort_avg) * 0.2, 0.5)
+                        gauge_min = min(cohort_min, focus_val) - range_pad
+                        gauge_max = max(cohort_max, focus_val) + range_pad
+                        
+                        if "Ratio" in metric or "Turnover" in metric or "Coverage" in metric:
+                            gauge_min = max(0, gauge_min)
+                        
+                        # 5-zone smooth gradient for refined look
+                        rng = gauge_max - gauge_min
+                        if metric in lower_is_better:
+                            bar_color = "#22c55e" if focus_val <= cohort_avg else "#ef4444"
+                            zone_colors = [
+                                "rgba(34, 197, 94, 0.3)",   # green
+                                "rgba(132, 204, 22, 0.2)",  # lime
+                                "rgba(234, 179, 8, 0.2)",   # yellow
+                                "rgba(249, 115, 22, 0.2)",  # orange
+                                "rgba(239, 68, 68, 0.3)",   # red
+                            ]
+                        else:
+                            bar_color = "#22c55e" if focus_val >= cohort_avg else "#ef4444"
+                            zone_colors = [
+                                "rgba(239, 68, 68, 0.3)",
+                                "rgba(249, 115, 22, 0.2)",
+                                "rgba(234, 179, 8, 0.2)",
+                                "rgba(132, 204, 22, 0.2)",
+                                "rgba(34, 197, 94, 0.3)",
+                            ]
+                        
+                        steps = [{"range": [gauge_min + rng * (i/5), gauge_min + rng * ((i+1)/5)], "color": zone_colors[i]} for i in range(5)]
+                        
+                        fig = go.Figure(go.Indicator(
+                            mode="gauge+number+delta",
+                            value=focus_val,
+                            title={"text": f"<b style='font-size:15px'>{metric}</b><br><span style='font-size:12px;color:#888'>{focus_ticker} vs cohort avg</span>", "font": {"size": 16}},
+                            number={"font": {"size": 36, "color": bar_color}, "valueformat": ",.2f" if abs(focus_val) < 100 else ",.0f"},
+                            delta={
+                                "reference": cohort_avg,
+                                "relative": False,
+                                "valueformat": ".2f",
+                                "increasing": {"color": "#22c55e" if metric not in lower_is_better else "#ef4444"},
+                                "decreasing": {"color": "#ef4444" if metric not in lower_is_better else "#22c55e"},
+                                "suffix": " vs avg",
+                                "font": {"size": 13}
+                            },
+                            gauge={
+                                "shape": "angular",
+                                "axis": {"range": [gauge_min, gauge_max], "tickfont": {"size": 11}, "tickcolor": "#888"},
+                                "bar": {"color": bar_color, "thickness": 0.4},
+                                "bgcolor": "rgba(128,128,128,0.08)",
+                                "borderwidth": 1,
+                                "bordercolor": "rgba(128,128,128,0.15)",
+                                "steps": steps,
+                                "threshold": {
+                                    "line": {"color": "#f97316", "width": 4},
+                                    "thickness": 0.85,
+                                    "value": cohort_avg
+                                }
                             }
-                        }
-                    ))
-                    
-                    fig.update_layout(
-                        height=260,
-                        margin=dict(l=20, r=20, t=70, b=15),
-                        paper_bgcolor='rgba(0,0,0,0)',
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-                    
-                    # Formula popover
-                    if metric in kpi_formulas:
-                        f = kpi_formulas[metric]
-                        with st.popover(f"ℹ️ {metric}"):
-                            st.markdown(f"**Formula:** `{f['formula']}`")
-                            st.markdown(f"**What it means:** {f['meaning']}")
-                            st.caption(f"Source: {f['source']}")
+                        ))
+                        
+                        fig.update_layout(
+                            height=280,
+                            margin=dict(l=30, r=30, t=80, b=20),
+                            paper_bgcolor='rgba(0,0,0,0)',
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                        
+                        # Cohort avg label + formula popover side by side
+                        info_cols = st.columns([1, 1])
+                        with info_cols[0]:
+                            st.caption(f"🟠 Cohort avg: **{cohort_avg:.2f}**")
+                        with info_cols[1]:
+                            if metric in kpi_formulas:
+                                f = kpi_formulas[metric]
+                                with st.popover("ℹ️ Formula"):
+                                    st.markdown(f"**{metric}**")
+                                    st.code(f['formula'], language=None)
+                                    st.markdown(f"{f['meaning']}")
+                                    st.caption(f"📊 Source: {f['source']}")
+                        
+                        st.markdown("---")
 
     # 2. DuPont Analysis (Redesigned)
     with tabs[1]:
