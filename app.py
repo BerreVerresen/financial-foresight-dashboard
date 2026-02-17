@@ -19,10 +19,9 @@ st.set_page_config(
 st.markdown("""
 <style>
     .metric-card {
-        background-color: #1E293B;
         padding: 1rem;
         border-radius: 10px;
-        border: 1px solid #334155;
+        border: 1px solid rgba(128, 128, 128, 0.2);
         margin-bottom: 1rem;
     }
     .highlight {
@@ -37,18 +36,16 @@ st.markdown("""
         white-space: pre-wrap;
         background-color: transparent;
         border-radius: 5px;
-        color: white;
         font-weight: 600;
     }
     .stTabs [aria-selected="true"] {
-        background-color: #0f172a;
+        background-color: rgba(128, 128, 128, 0.1);
         color: #38bdf8;
     }
     .chart-card {
-        background-color: #1E293B;
         padding: 1rem;
         border-radius: 10px;
-        border: 1px solid #334155;
+        border: 1px solid rgba(128, 128, 128, 0.2);
         margin-bottom: 1rem;
     }
 </style>
@@ -558,11 +555,110 @@ if 'data' in st.session_state:
                     )
                     st.plotly_chart(fig, use_container_width=True)
 
-    # 5. Deep Dive Table
+    # 5. Deep Dive (Expert Suite)
     with tabs[4]:
-        st.subheader("📑 Deep Dive & Trends")
+        st.subheader("📑 Expert Deep Dive")
         
-        # A. Sparklines (Trends)
+        # A. Governance & Risk Scorecard
+        st.markdown("### 🏛️ Governance & Risk")
+        gov_cols = st.columns(4)
+        
+        # Focus Company Risk Profile
+        m = focus_company['metrics']
+        
+        with gov_cols[0]:
+            st.metric("Audit Risk", m.get('Audit Risk', 'N/A'))
+            st.metric("Board Risk", m.get('Board Risk', 'N/A'))
+        with gov_cols[1]:
+            st.metric("Comp. Risk", m.get('Compensation Risk', 'N/A'))
+            st.metric("Shareholder Risk", m.get('Shareholder Rights Risk', 'N/A'))
+        with gov_cols[2]:
+            st.metric("Inst. Ownership", f"{m.get('Inst. Ownership %', 0)}%")
+            st.metric("Insider Ownership", f"{m.get('Insider Ownership %', 0)}%")
+        with gov_cols[3]:
+             st.metric("Beta", m.get('Beta', 0))
+             
+        st.divider()
+
+        # B. Rule of 40 Analysis
+        st.markdown("### 🦄 Rule of 40 (SaaS Valuation)")
+        st.caption("Growth + Profitability (FCF Margin). >40% is elite.")
+        
+        r40_data = []
+        for c in companies:
+            r40_data.append({
+                "Ticker": c['ticker'],
+                "Revenue Growth %": c['metrics'].get('Revenue CAGR (3y)', 0),
+                "FCF Margin %": c['metrics'].get('FCF Margin %', 0),
+                "Rule of 40": c['metrics'].get('Rule of 40', 0)
+            })
+        
+        df_r40 = pd.DataFrame(r40_data)
+        
+        fig_r40 = px.scatter(
+            df_r40,
+            x="Revenue Growth %",
+            y="FCF Margin %",
+            text="Ticker",
+            color="Rule of 40",
+            title="Rule of 40 Map",
+            color_continuous_scale="RdYlGn",
+            range_color=[0, 60]
+        )
+        # Add 40% line
+        # Simple diagonal line y = 40 - x
+        x_range = np.linspace(df_r40["Revenue Growth %"].min()-5, df_r40["Revenue Growth %"].max()+5, 100)
+        y_line = 40 - x_range
+        fig_r40.add_trace(go.Scatter(x=x_range, y=y_line, mode='lines', name='Rule of 40 Line', line=dict(dash='dash', color='red')))
+        
+        fig_r40.update_traces(textposition='top center')
+        fig_r40.update_layout(height=500)
+        st.plotly_chart(fig_r40, use_container_width=True)
+        
+        st.divider()
+
+        # C. Capital Allocation Bridge (Cash Flow)
+        st.markdown(f"### 🌉 Capital Allocation Bridge (Last Fiscal Year): {focus_ticker}")
+        
+        # Get raw CF data for bridge
+        try:
+            cf = focus_company['raw_data']['financials']['annual']['cash_flow']
+            
+            # Helper to get latest absolute value
+            def get_latest_abs(key):
+                val = 0
+                if key in cf:
+                    # Get first value
+                     val = list(cf[key].values())[0] if cf[key] else 0
+                return val
+
+            ocf = get_latest_abs("Operating Cash Flow")
+            capex = get_latest_abs("Capital Expenditure") # Usually negative
+            div = get_latest_abs("Cash Dividends Paid") # Usually negative
+            buyback = get_latest_abs("Repurchase Of Capital Stock") # Usually negative
+            acq = get_latest_abs("Net Business Purchase And Sale") # usually negative
+            
+            # Waterfall
+            fig_bridge = go.Figure(go.Waterfall(
+                name = "20", orientation = "v",
+                measure = ["absolute", "relative", "relative", "relative", "relative", "total"],
+                x = ["Operating Cash Flow", "Capex", "Dividends", "Buybacks", "M&A", "Remaining Cash Gen"],
+                textposition = "outside",
+                # Note: Capex/Divs/Buybacks are usually negative in Yahoo data.
+                # If they are positive, we invert them for the bridge logic (Uses of Cash)
+                y = [ocf, capex, div, buyback, acq, 0],
+                connector = {"line":{"color":"rgb(63, 63, 63)"}},
+            ))
+            
+            fig_bridge.update_layout(title = "Cash Flow Allocation Waterfall", showlegend = True, height=500)
+            st.plotly_chart(fig_bridge, use_container_width=True)
+            
+        except Exception as e:
+            st.warning(f"Could not build Capital Allocation Bridge: {e}")
+
+        st.divider()
+
+        # D. Sparklines (Trends)
         st.markdown("### 📈 3-Year Trends")
         
         trend_data = []
@@ -605,7 +701,7 @@ if 'data' in st.session_state:
             hide_index=True
         )
 
-        # B. Full Metrics Table
+        # E. Full Metrics Table
         st.markdown("### 📋 Detailed Metrics")
         full_df = pd.json_normalize([{'Ticker': c['ticker'], **c['metrics']} for c in companies]).set_index("Ticker")
         st.dataframe(full_df.style.background_gradient(cmap="viridis"), use_container_width=True)

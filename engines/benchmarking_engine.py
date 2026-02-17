@@ -243,6 +243,20 @@ class BenchmarkingEngine:
                 "R&D Intensity %": round(safe_div(rnd, rev) * 100, 1),
                 "Shareholder Yield %": round(shareholder_yield * 100, 1),
                 
+                # Expert: Rule of 40
+                "FCF Margin %": round(safe_div(fcf, rev) * 100, 1),
+                "Rule of 40": round((revenue_cagr * 100) + (safe_div(fcf, rev) * 100), 1),
+                
+                # Expert: Governance & Risks (from Meta)
+                "Audit Risk": meta.get('auditRisk', None),
+                "Board Risk": meta.get('boardRisk', None),
+                "Compensation Risk": meta.get('compensationRisk', None),
+                "Shareholder Rights Risk": meta.get('shareholderRightsRisk', None),
+                "Overall Risk": meta.get('overallRisk', None),
+                "Beta": round(meta.get('beta', 0), 2),
+                "Inst. Ownership %": round(meta.get('heldPercentInstitutions', 0) * 100, 1),
+                "Insider Ownership %": round(meta.get('heldPercentInsiders', 0) * 100, 1),
+
                 # DuPont Drivers
                 "Asset Turnover": round(safe_div(rev, get_latest_any(bs, ["Total Assets", "TotalAssets"])), 2),
                 "Financial Leverage": round(safe_div(get_latest_any(bs, ["Total Assets", "TotalAssets"]), equity), 2),
