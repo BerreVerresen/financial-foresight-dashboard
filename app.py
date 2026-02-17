@@ -341,6 +341,39 @@ if 'data' in st.session_state:
         # B. Individual KPI Graphics
         st.markdown(f"### Key {focus_mode} Indicators")
         
+        # Formula definitions for clickable help
+        kpi_formulas = {
+            "Revenue ($B)": {"formula": "Total Revenue / 1,000,000,000", "meaning": "Top-line sales in billions.", "source": "Income Statement"},
+            "Revenue CAGR (3y)": {"formula": "(Revenue_latest / Revenue_3y_ago)^(1/3) − 1", "meaning": "Compound annual growth rate of revenue over 3 years.", "source": "Income Statement"},
+            "EBITDA CAGR (3y)": {"formula": "(EBITDA_latest / EBITDA_3y_ago)^(1/3) − 1", "meaning": "Compound annual growth rate of EBITDA over 3 years.", "source": "Income Statement"},
+            "Gross Margin %": {"formula": "(Revenue − COGS) / Revenue × 100", "meaning": "How much of each dollar of revenue is retained after direct costs.", "source": "Income Statement"},
+            "EBITDA Margin %": {"formula": "EBITDA / Revenue × 100", "meaning": "Profitability before interest, taxes, depreciation & amortization.", "source": "Income Statement"},
+            "Net Margin %": {"formula": "Net Income / Revenue × 100", "meaning": "Bottom-line profitability — what % of revenue becomes profit.", "source": "Income Statement"},
+            "Operating Margin %": {"formula": "Operating Income / Revenue × 100", "meaning": "Profitability from core operations before interest and taxes.", "source": "Income Statement"},
+            "Current Ratio": {"formula": "Current Assets / Current Liabilities", "meaning": "Can the company cover short-term obligations? >1 = healthy.", "source": "Balance Sheet (or Yahoo metadata)"},
+            "Quick Ratio": {"formula": "(Current Assets − Inventory) / Current Liabilities", "meaning": "Like Current Ratio but excludes inventory (harder to liquidate).", "source": "Balance Sheet (or Yahoo metadata)"},
+            "Cash Ratio": {"formula": "Cash & Equivalents / Current Liabilities", "meaning": "Strictest liquidity test — only cash counted.", "source": "Balance Sheet"},
+            "CCC (Days)": {"formula": "DIO + DSO − DPO", "meaning": "Cash Conversion Cycle: days to convert inventory investment into cash. Lower = better.", "source": "Computed from IS + BS"},
+            "DIO (Days)": {"formula": "(Inventory / COGS) × 365", "meaning": "Days to sell inventory. Lower = faster turnover.", "source": "Balance Sheet + Income Statement"},
+            "DSO (Days)": {"formula": "(Accounts Receivable / Revenue) × 365", "meaning": "Days to collect payment from customers. Lower = faster collection.", "source": "Balance Sheet + Income Statement"},
+            "DPO (Days)": {"formula": "(Accounts Payable / COGS) × 365", "meaning": "Days to pay suppliers. Higher = better cash preservation.", "source": "Balance Sheet + Income Statement"},
+            "Net Debt / EBITDA": {"formula": "(Total Debt − Cash) / EBITDA", "meaning": "Leverage: how many years of EBITDA to repay net debt. <3 is healthy.", "source": "Balance Sheet + Income Statement"},
+            "Interest Coverage": {"formula": "EBITDA / Interest Expense", "meaning": "Can the company afford its interest payments? >3 is comfortable.", "source": "Income Statement"},
+            "Debt / Equity": {"formula": "Total Debt / Shareholders' Equity", "meaning": "Financial leverage. Higher = more debt-financed.", "source": "Balance Sheet"},
+            "Financial Leverage": {"formula": "Total Assets / Shareholders' Equity", "meaning": "Asset-to-equity multiplier. Higher = more leverage.", "source": "Balance Sheet"},
+            "Asset Turnover": {"formula": "Revenue / Total Assets", "meaning": "Efficiency: how much revenue per dollar of assets.", "source": "Income Statement + Balance Sheet"},
+            "Fixed Asset Turnover": {"formula": "Revenue / Net PP&E", "meaning": "Revenue generated per dollar of fixed assets (property, plant, equipment).", "source": "Income Statement + Balance Sheet"},
+            "ROIC %": {"formula": "NOPAT / Invested Capital × 100", "meaning": "Return on Invested Capital — core profitability measure. NOPAT = EBIT × (1 - tax rate).", "source": "Income Statement + Balance Sheet"},
+            "ROE %": {"formula": "Net Income / Shareholders' Equity × 100", "meaning": "Return on Equity — profit per dollar of shareholder investment.", "source": "Income Statement + Balance Sheet"},
+            "ROA %": {"formula": "Net Income / Total Assets × 100", "meaning": "Return on Assets — profit per dollar of total assets.", "source": "Income Statement + Balance Sheet"},
+            "Dupont ROE": {"formula": "Net Margin × Asset Turnover × Financial Leverage", "meaning": "Decomposes ROE into three drivers: profitability, efficiency, leverage.", "source": "Computed"},
+            "Shareholder Yield %": {"formula": "(Dividends + Buybacks) / Market Cap × 100", "meaning": "Total cash returned to shareholders as % of market cap.", "source": "Cash Flow + Market Data"},
+            "EV / EBITDA": {"formula": "Enterprise Value / EBITDA", "meaning": "Valuation multiple. Lower = cheaper relative to earnings.", "source": "Market Data + Income Statement"},
+            "P/E": {"formula": "Market Price / Earnings Per Share", "meaning": "Price-to-Earnings ratio. How much investors pay per dollar of earnings.", "source": "Market Data + Income Statement"},
+            "P/B": {"formula": "Market Price / Book Value Per Share", "meaning": "Price-to-Book ratio. >1 means market values company above its book value.", "source": "Market Data + Balance Sheet"},
+            "Dividend Yield %": {"formula": "Annual Dividends Per Share / Share Price × 100", "meaning": "Annual dividend income as % of share price.", "source": "Market Data"},
+        }
+        
         view_mode = st.radio("View", ["📊 Bar Charts", "🎯 Gauge View"], horizontal=True, key="chart_view_mode")
         
         if view_mode == "📊 Bar Charts":
@@ -373,6 +406,14 @@ if 'data' in st.session_state:
                         xaxis=dict(showgrid=False)
                     )
                     st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Formula popover
+                    if metric in kpi_formulas:
+                        f = kpi_formulas[metric]
+                        with st.popover(f"ℹ️ {metric}"):
+                            st.markdown(f"**Formula:** `{f['formula']}`")
+                            st.markdown(f"**What it means:** {f['meaning']}")
+                            st.caption(f"Source: {f['source']}")
         
         else:
             # --- Gauge View (Industry Benchmark style) ---
@@ -467,6 +508,14 @@ if 'data' in st.session_state:
                         paper_bgcolor='rgba(0,0,0,0)',
                     )
                     st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Formula popover
+                    if metric in kpi_formulas:
+                        f = kpi_formulas[metric]
+                        with st.popover(f"ℹ️ {metric}"):
+                            st.markdown(f"**Formula:** `{f['formula']}`")
+                            st.markdown(f"**What it means:** {f['meaning']}")
+                            st.caption(f"Source: {f['source']}")
 
     # 2. DuPont Analysis (Redesigned)
     with tabs[1]:
