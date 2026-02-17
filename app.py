@@ -333,8 +333,8 @@ if 'data' in st.session_state:
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("ROE %", f"{roe}%", delta=None)
         c2.metric("Net Margin %", f"{net_margin}%", help="Net Income / Revenue")
-        c3.metric("Asset Turnover", f"{asset_turnover}x", help="Revenue / Total Assets")
-        c4.metric("Fin. Leverage", f"{leverage}x", help="Assets / Equity")
+        c3.metric("Asset Turnover", f"{asset_turnover:.2f}x", help="Revenue / Total Assets")
+        c4.metric("Fin. Leverage", f"{leverage:.2f}x", help="Assets / Equity")
         
         st.divider()
         

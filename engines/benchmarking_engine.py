@@ -82,8 +82,6 @@ class BenchmarkingEngine:
         # Helper to safely get the latest year value
         def get_latest(df, field):
             if field not in df.columns: return 0.0
-            
-            # Sort index (dates) desc
             try:
                 # Filter out None/NaN
                 series = df[field].dropna().sort_index(ascending=False)
@@ -91,6 +89,13 @@ class BenchmarkingEngine:
                 return float(series.iloc[0])
             except:
                 return 0.0
+
+        def get_latest_any(df, fields: List[str]):
+            """Tries multiple fields in order and returns the first non-zero found."""
+            for f in fields:
+                val = get_latest(df, f)
+                if val != 0.0: return val
+            return 0.0
 
         def get_cagr(df, field, years=3):
             if field not in df.columns: return 0.0
@@ -115,11 +120,11 @@ class BenchmarkingEngine:
         revenue_cagr = get_cagr(inc, "Total Revenue")
         
         # 2. Profitability (Margins)
-        rev = get_latest(inc, "Total Revenue")
-        gp = get_latest(inc, "Gross Profit")
-        ebitda = get_latest(inc, "EBITDA") or get_latest(inc, "Normalized EBITDA")
-        ebit = get_latest(inc, "EBIT") or get_latest(inc, "Operating Income")
-        net_income = get_latest(inc, "Net Income")
+        rev = get_latest_any(inc, ["Total Revenue", "TotalRevenue", "Operating Revenue", "Revenue"])
+        gp = get_latest_any(inc, ["Gross Profit", "GrossProfit"])
+        ebitda = get_latest_any(inc, ["EBITDA", "Normalized EBITDA"])
+        ebit = get_latest_any(inc, ["EBIT", "Operating Income", "OperatingIncome"])
+        net_income = get_latest_any(inc, ["Net Income", "NetIncome", "Net Income Common Stockholders"])
         
         gross_margin = safe_div(gp, rev)
         ebitda_margin = safe_div(ebitda, rev)
@@ -127,8 +132,8 @@ class BenchmarkingEngine:
         
         # 3. Efficiency / Ops (CCC)
         inventory = get_latest(bs, "Inventory")
-        receivables = get_latest(bs, "Receivables") or get_latest(bs, "Accounts Receivable")
-        payables = get_latest(bs, "Accounts Payable") or get_latest(bs, "Payables")
+        receivables = get_latest_any(bs, ["Receivables", "Accounts Receivable"])
+        payables = get_latest_any(bs, ["Accounts Payable", "Payables"])
         cogs = get_latest(inc, "Cost Of Revenue")
         
         dio = safe_div(inventory, cogs) * 365
@@ -147,10 +152,11 @@ class BenchmarkingEngine:
         nopat = ebit * (1 - effective_tax_rate)
         
         # Invested Capital
-        equity = get_latest(bs, "Stockholders Equity") or get_latest(bs, "Total Equity Gross Minority Interest")
+        equity = get_latest_any(bs, ["Stockholders Equity", "Total Equity Gross Minority Interest", "TotalEquity"])
         debt = get_latest(bs, "Total Debt")
-        cash = get_latest(bs, "Cash And Cash Equivalents")
-        invested_capital = get_latest(bs, "Invested Capital")
+        cash = get_latest_any(bs, ["Cash And Cash Equivalents", "CashAndCashEquivalents"])
+        invested_capital = get_latest_any(bs, ["Invested Capital", "InvestedCapital"])
+        
         if not invested_capital:
             invested_capital = (equity + debt - cash)
 
@@ -229,8 +235,8 @@ class BenchmarkingEngine:
                 "Shareholder Yield %": round(shareholder_yield * 100, 1),
                 
                 # DuPont Drivers
-                "Asset Turnover": round(safe_div(rev, get_latest(bs, "Total Assets")), 2),
-                "Financial Leverage": round(safe_div(get_latest(bs, "Total Assets"), equity), 2),
+                "Asset Turnover": round(safe_div(rev, get_latest_any(bs, ["Total Assets", "TotalAssets"])), 2),
+                "Financial Leverage": round(safe_div(get_latest_any(bs, ["Total Assets", "TotalAssets"]), equity), 2),
                 
                 # Valuations
                 "EV/EBITDA": round(ev_ebitda, 1),
