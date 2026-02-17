@@ -341,42 +341,133 @@ if 'data' in st.session_state:
         # B. Individual KPI Graphics
         st.markdown(f"### Key {focus_mode} Indicators")
         
-        # Dynamic Grid based on Selection
-        # Use 3 cols
-        cols = st.columns(3)
+        view_mode = st.radio("View", ["📊 Bar Charts", "🎯 Gauge View"], horizontal=True, key="chart_view_mode")
         
-        for i, metric in enumerate(metrics_to_show):
-            col = cols[i % 3]
-            with col:
-                # Prepare Data for Chart
-                chart_data = []
-                for c in companies:
-                    chart_data.append({
-                        "Ticker": c['ticker'],
-                        "Value": c['metrics'].get(metric, 0),
-                        "Color": '#38bdf8' if c['ticker'] == focus_ticker else '#334155'
-                    })
-                df_chart = pd.DataFrame(chart_data)
-                
-                # Plotly Chart
-                fig = px.bar(
-                    df_chart, 
-                    x="Ticker", 
-                    y="Value", 
-                    color="Ticker",
-                    color_discrete_map={row['Ticker']: row['Color'] for _, row in df_chart.iterrows()},
-                    title=metric
-                )
-                fig.update_layout(
-                    showlegend=False,
-                    margin=dict(l=0, r=0, t=30, b=0),
-                    height=250,
-                    paper_bgcolor='rgba(0,0,0,0)',
-                    plot_bgcolor='rgba(0,0,0,0)',
-                    yaxis=dict(showgrid=True, gridcolor='#334155'),
-                    xaxis=dict(showgrid=False)
-                )
-                st.plotly_chart(fig, use_container_width=True)
+        if view_mode == "📊 Bar Charts":
+            # --- Bar Chart View (original) ---
+            cols = st.columns(3)
+            for i, metric in enumerate(metrics_to_show):
+                col = cols[i % 3]
+                with col:
+                    chart_data = []
+                    for c in companies:
+                        chart_data.append({
+                            "Ticker": c['ticker'],
+                            "Value": c['metrics'].get(metric, 0),
+                            "Color": '#38bdf8' if c['ticker'] == focus_ticker else '#334155'
+                        })
+                    df_chart = pd.DataFrame(chart_data)
+                    
+                    fig = px.bar(
+                        df_chart, x="Ticker", y="Value", color="Ticker",
+                        color_discrete_map={row['Ticker']: row['Color'] for _, row in df_chart.iterrows()},
+                        title=metric
+                    )
+                    fig.update_layout(
+                        showlegend=False,
+                        margin=dict(l=0, r=0, t=30, b=0),
+                        height=250,
+                        paper_bgcolor='rgba(0,0,0,0)',
+                        plot_bgcolor='rgba(0,0,0,0)',
+                        yaxis=dict(showgrid=True, gridcolor='#334155'),
+                        xaxis=dict(showgrid=False)
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+        
+        else:
+            # --- Gauge View (Industry Benchmark style) ---
+            # Metrics where LOWER is better (inverted color logic)
+            lower_is_better = {"CCC (Days)", "DIO (Days)", "DSO (Days)", "DPO (Days)", 
+                               "Net Debt / EBITDA", "Debt / Equity", "Financial Leverage"}
+            
+            cols = st.columns(3)
+            for i, metric in enumerate(metrics_to_show):
+                col = cols[i % 3]
+                with col:
+                    # Get focus company value
+                    focus_val = focus_company['metrics'].get(metric, 0)
+                    if focus_val is None: focus_val = 0
+                    
+                    # Get cohort values for range and average
+                    cohort_vals = [c['metrics'].get(metric, 0) for c in companies]
+                    cohort_vals = [v for v in cohort_vals if v is not None]
+                    if not cohort_vals:
+                        cohort_vals = [0]
+                    
+                    cohort_avg = np.mean(cohort_vals)
+                    cohort_min = min(cohort_vals)
+                    cohort_max = max(cohort_vals)
+                    
+                    # Build dynamic range with some padding
+                    range_pad = max(abs(cohort_max - cohort_min) * 0.3, abs(cohort_avg) * 0.2, 0.5)
+                    gauge_min = min(cohort_min, focus_val) - range_pad
+                    gauge_max = max(cohort_max, focus_val) + range_pad
+                    
+                    # For ratio metrics that should start at 0
+                    if "Ratio" in metric or "Turnover" in metric or "Coverage" in metric:
+                        gauge_min = max(0, gauge_min)
+                    
+                    delta_val = focus_val - cohort_avg
+                    
+                    # Color steps based on whether higher or lower is better
+                    if metric in lower_is_better:
+                        bar_color = "#4ade80" if focus_val <= cohort_avg else "#f87171"
+                        steps = [
+                            {"range": [gauge_min, gauge_min + (gauge_max - gauge_min) * 0.33], "color": "rgba(74, 222, 128, 0.15)"},
+                            {"range": [gauge_min + (gauge_max - gauge_min) * 0.33, gauge_min + (gauge_max - gauge_min) * 0.66], "color": "rgba(250, 204, 21, 0.15)"},
+                            {"range": [gauge_min + (gauge_max - gauge_min) * 0.66, gauge_max], "color": "rgba(248, 113, 113, 0.15)"},
+                        ]
+                    else:
+                        bar_color = "#4ade80" if focus_val >= cohort_avg else "#f87171"
+                        steps = [
+                            {"range": [gauge_min, gauge_min + (gauge_max - gauge_min) * 0.33], "color": "rgba(248, 113, 113, 0.15)"},
+                            {"range": [gauge_min + (gauge_max - gauge_min) * 0.33, gauge_min + (gauge_max - gauge_min) * 0.66], "color": "rgba(250, 204, 21, 0.15)"},
+                            {"range": [gauge_min + (gauge_max - gauge_min) * 0.66, gauge_max], "color": "rgba(74, 222, 128, 0.15)"},
+                        ]
+                    
+                    # Format number for display
+                    if abs(focus_val) >= 100:
+                        num_fmt = f"{focus_val:,.0f}"
+                    elif abs(focus_val) >= 1:
+                        num_fmt = f"{focus_val:.2f}"
+                    else:
+                        num_fmt = f"{focus_val:.3f}"
+                    
+                    fig = go.Figure(go.Indicator(
+                        mode="gauge+number+delta",
+                        value=focus_val,
+                        title={"text": f"<b>{metric}</b><br><span style='font-size:11px;color:gray'>{focus_ticker}</span>", "font": {"size": 14}},
+                        number={"font": {"size": 28}},
+                        delta={
+                            "reference": cohort_avg,
+                            "relative": False,
+                            "valueformat": ".2f",
+                            "increasing": {"color": "#4ade80" if metric not in lower_is_better else "#f87171"},
+                            "decreasing": {"color": "#f87171" if metric not in lower_is_better else "#4ade80"},
+                            "suffix": " vs avg",
+                            "font": {"size": 12}
+                        },
+                        gauge={
+                            "axis": {"range": [gauge_min, gauge_max], "tickfont": {"size": 10}},
+                            "bar": {"color": bar_color, "thickness": 0.3},
+                            "bgcolor": "rgba(0,0,0,0)",
+                            "borderwidth": 0,
+                            "steps": steps,
+                            "threshold": {
+                                "line": {"color": "#f8fafc", "width": 2},
+                                "thickness": 0.8,
+                                "value": cohort_avg
+                            }
+                        }
+                    ))
+                    
+                    fig.update_layout(
+                        height=200,
+                        margin=dict(l=20, r=20, t=50, b=10),
+                        paper_bgcolor='rgba(0,0,0,0)',
+                        font=dict(color="#e2e8f0"),
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
 
     # 2. DuPont Analysis (Redesigned)
     with tabs[1]:
