@@ -299,8 +299,8 @@ if 'data' in st.session_state:
     with tabs[0]:
         st.subheader("Comparative Analysis")
         
-        # Focus Selector
-        focus_mode = st.radio("Benchmark Focus", ["Overview", "Liquidity", "Solvency", "Efficiency", "Returns"], horizontal=True)
+        # Focus Selector — dynamically add Custom KPIs if any have been saved
+        focus_options = ["Overview", "Liquidity", "Solvency", "Efficiency", "Returns"]
         
         # Define Metrics per Focus
         metric_groups = {
@@ -310,6 +310,14 @@ if 'data' in st.session_state:
             "Efficiency": ["Asset Turnover", "ROIC %", "ROE %", "Fixed Asset Turnover", "CCC (Days)"],
             "Returns": ["ROE %", "ROIC %", "Shareholder Yield %", "Net Margin %", "Dupont ROE"]
         }
+        
+        # Add Custom KPIs focus mode if any saved
+        saved_kpis = st.session_state.get('saved_sandbox_kpis', {})
+        if saved_kpis:
+            metric_groups["📌 Custom KPIs"] = list(saved_kpis.keys())
+            focus_options.append("📌 Custom KPIs")
+        
+        focus_mode = st.radio("Benchmark Focus", focus_options, horizontal=True)
         
         # Fallback to Overview if key missing
         metrics_to_show = metric_groups.get(focus_mode, metric_groups["Overview"])
@@ -458,7 +466,7 @@ if 'data' in st.session_state:
 
     # 4. Advanced Sandbox 3.0
     with tabs[3]:
-        st.subheader("🧪 Sandbox 3.0: Custom KPI Lab")
+        st.subheader("🧪 Custom KPI Lab")
         
         import re
         
@@ -480,62 +488,42 @@ if 'data' in st.session_state:
         
         all_options = sorted(list(set(sample_metrics + raw_keys_inc + raw_keys_bs + raw_keys_cf)))
         
-        # --- A. Template Gallery ---
-        st.markdown("### 📋 Quick Templates")
-        st.caption("Select a template to auto-fill the formula, or build your own below.")
+        # --- A. Variable Explorer (Multi-select with comparison table) ---
+        st.markdown("### 🔍 Variable Explorer")
+        st.caption("Search and select multiple variables to compare them side by side across all companies, then use their names in a formula below.")
         
-        template_options = {
-            "(none)": {"formula": "", "name": "My Custom KPI"},
-            "EBITDA per Employee": {"formula": "'EBITDA' / 'fullTimeEmployees'", "name": "EBITDA / Employee"},
-            "Revenue per Employee": {"formula": "'Total Revenue' / 'fullTimeEmployees'", "name": "Revenue / Employee"},
-            "R&D Efficiency": {"formula": "'Total Revenue' / 'Research And Development'", "name": "R&D Efficiency (Rev/R&D)"},
-            "Capex / OCF %": {"formula": "abs('Capital Expenditure') / 'Operating Cash Flow' * 100", "name": "Capex / OCF %"},
-            "Earnings Quality": {"formula": "'Net Income' / 'Operating Cash Flow'", "name": "Earnings Quality"},
-            "Working Capital / Rev %": {"formula": "('Current Assets' - 'Current Liabilities') / 'Total Revenue' * 100", "name": "Working Capital / Revenue %"},
-        }
+        selected_vars = st.multiselect(
+            "Search & select variables",
+            options=all_options,
+            default=[],
+            placeholder="Type to search... (e.g. Revenue, EBITDA, Current Assets)",
+            key="sandbox_var_explorer"
+        )
         
-        selected_template = st.selectbox("Choose template", list(template_options.keys()), key="sandbox_template")
-        
-        # Set defaults from template
-        tpl = template_options[selected_template]
-        default_formula = tpl["formula"]
-        default_name = tpl["name"]
-        
-        st.divider()
-        
-        # --- B. Variable Browser (Dropdown-based) ---
-        st.markdown("### 🔍 Variable Browser")
-        st.caption("Select a variable to see its formatted name — copy and paste it into the formula.")
-        
-        var_category = st.selectbox("Category", ["Computed Metrics", "Income Statement", "Balance Sheet", "Cash Flow"], key="var_cat")
-        
-        if var_category == "Computed Metrics":
-            var_list = sorted(sample_metrics)
-        elif var_category == "Income Statement":
-            var_list = raw_keys_inc
-        elif var_category == "Balance Sheet":
-            var_list = raw_keys_bs
-        else:
-            var_list = raw_keys_cf
-        
-        if var_list:
-            selected_var = st.selectbox("Select variable", ["(browse)"] + var_list, key="var_select")
-            if selected_var != "(browse)":
-                st.code(f"'{selected_var}'", language="python")
-                st.caption("👆 Copy the text above and paste it into the formula field below.")
-                
-                # Show current values across companies
-                var_preview = []
-                for c_item in companies:
-                    val = get_value_for_ticker(companies, c_item['ticker'], selected_var)
-                    var_preview.append({"Ticker": c_item['ticker'], "Value": val if val is not None else 0})
-                st.dataframe(pd.DataFrame(var_preview).set_index("Ticker"), use_container_width=True, height=150)
-        else:
-            st.info("No variables available in this category.")
+        if selected_vars:
+            # Build side-by-side comparison table
+            comparison_rows = []
+            for c_item in companies:
+                row = {"Ticker": c_item['ticker']}
+                for var_name in selected_vars:
+                    val = get_value_for_ticker(companies, c_item['ticker'], var_name)
+                    row[var_name] = val if val is not None else 0
+                comparison_rows.append(row)
+            
+            df_comparison = pd.DataFrame(comparison_rows).set_index("Ticker")
+            st.dataframe(
+                df_comparison.style.format("{:,.2f}").background_gradient(cmap="Blues", axis=0),
+                use_container_width=True
+            )
+            
+            # Show formatted names for copy-paste
+            st.caption("**Copy these into your formula** (single-quoted variable names):")
+            formula_parts = "  ".join([f"`'{v}'`" for v in selected_vars])
+            st.markdown(formula_parts)
         
         st.divider()
         
-        # --- C. Formula Builder ---
+        # --- B. Formula Builder ---
         st.markdown("### ⚡ Formula Builder")
         st.caption("Use single quotes around variable names. Operators: `+` `-` `*` `/` `abs()` `round()`")
         
@@ -543,20 +531,19 @@ if 'data' in st.session_state:
         with f_c1:
             formula = st.text_input(
                 "Formula", 
-                value=default_formula,
                 placeholder="e.g. ('Total Revenue' - 'Cost Of Revenue') / 'fullTimeEmployees'",
                 key="formula_input"
             )
         with f_c2:
             metric_name = st.text_input(
                 "Metric Name", 
-                value=default_name,
+                value="My Custom KPI",
                 key="metric_name_input"
             )
         
         st.divider()
 
-        # --- D. Calculate & Visualize ---
+        # --- C. Calculate & Visualize ---
         calc_col1, calc_col2 = st.columns([1, 1])
         with calc_col1:
             run_calc = st.button("🚀 Calculate", type="primary", use_container_width=True)
@@ -628,7 +615,7 @@ if 'data' in st.session_state:
                     )
                     st.plotly_chart(fig, use_container_width=True)
                 
-                # --- E. Input Variable Breakdown ---
+                # --- D. Input Variable Breakdown ---
                 if len(needed_vars) > 0:
                     st.markdown("### 🔬 Input Variable Breakdown")
                     st.caption("Individual values for each variable used in your formula.")
@@ -654,20 +641,30 @@ if 'data' in st.session_state:
                             )
                             st.plotly_chart(fig_v, use_container_width=True)
                 
-                # --- F. Save to Strategic Comparison ---
+                # --- E. Save to Strategic Comparison ---
                 if save_to_comparison:
-                    if 'custom_kpis' not in st.session_state:
-                        st.session_state['custom_kpis'] = {}
-                    
+                    # Write computed values directly into the companies list (same object reference)
                     for r in results:
                         ticker = r['Ticker']
-                        for comp in st.session_state.get('data', {}).get('companies', []):
+                        for comp in companies:
                             if comp['ticker'] == ticker:
                                 comp['metrics'][metric_name] = r[metric_name]
                     
-                    st.session_state['custom_kpis'][metric_name] = formula
-                    st.success(f"✅ **{metric_name}** saved! It now appears in the Strategic Comparison tab.")
+                    # Track saved KPIs so Strategic Comparison can show them
+                    if 'saved_sandbox_kpis' not in st.session_state:
+                        st.session_state['saved_sandbox_kpis'] = {}
+                    st.session_state['saved_sandbox_kpis'][metric_name] = formula
+                    
+                    st.success(f"✅ **{metric_name}** saved! Switch to Strategic Comparison → '📌 Custom KPIs' to view it.")
                     st.balloons()
+        
+        # --- F. Saved Custom KPIs ---
+        saved_kpis = st.session_state.get('saved_sandbox_kpis', {})
+        if saved_kpis:
+            st.divider()
+            st.markdown("### 💾 Saved Custom KPIs")
+            for kpi_name, kpi_formula in saved_kpis.items():
+                st.markdown(f"**{kpi_name}**: `{kpi_formula}`")
 
     # 5. Deep Dive (Expert Suite)
     with tabs[4]:
