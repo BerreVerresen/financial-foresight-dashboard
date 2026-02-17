@@ -773,7 +773,8 @@ if 'data' in st.session_state:
             def get_latest_val(key):
                 """Get latest year value from cash flow dict."""
                 if key in cf and cf[key]:
-                    return list(cf[key].values())[0]
+                    val = list(cf[key].values())[0]
+                    return val if val is not None else 0
                 return 0
 
             ocf = get_latest_val("Operating Cash Flow")
@@ -900,7 +901,7 @@ if 'data' in st.session_state:
                     if series:
                         sorted_dates = sorted(series.keys())
                         dates = sorted_dates[-5:]  # last 5 years
-                        vals = [series[d] / 1e9 for d in dates]  # Convert to billions
+                        vals = [(series[d] / 1e9 if series[d] is not None else 0) for d in dates]  # Convert to billions
                         # Use year labels
                         years = [d[:4] if len(d) >= 4 else d for d in dates]
                         
