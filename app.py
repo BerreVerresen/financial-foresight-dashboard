@@ -60,6 +60,11 @@ st.markdown("""
 
 # Import Local Engine
 from engines.benchmarking_engine import BenchmarkingEngine
+from engines.competitor_discovery import CompetitorDiscoveryEngine
+from dotenv import load_dotenv
+
+# Load Environment Variables
+load_dotenv()
 
 @st.cache_data(show_spinner=False)
 def get_data(ticker_list):
@@ -130,23 +135,84 @@ def get_value_for_ticker(companies, ticker, key):
 # Sidebar
 # -------------------------------------------------------------------------
 st.sidebar.title("Configuration")
-tickers_input = st.sidebar.text_area("Tickers", value="MSFT, AAPL, AMZN, GOOGL")
+
+# API Key Config (Sidebar)
+api_key = st.sidebar.text_input("OpenAI API Key", type="password", help="Required for Competitor Discovery")
+if not api_key:
+    # Try getting from env
+    api_key = os.getenv("OPENAI_API_KEY")
+
+# Ticker Management (with Session State)
+if 'ticker_input_str' not in st.session_state:
+    st.session_state['ticker_input_str'] = "MSFT, AAPL, AMZN, GOOGL"
+
+tickers_text = st.sidebar.text_area("Tickers", key="ticker_input_str")
+
+# --- Competitor Discovery (AI Powered) ---
+with st.sidebar.expander("🤖 Find Competitors (AI)", expanded=False):
+    target_ticker = st.text_input("Target Company Ticker", placeholder="e.g. TSLA")
+    
+    if st.button("Find Competitors"):
+        if not api_key:
+            st.error("Please provide an OpenAI API Key.")
+        elif not target_ticker:
+            st.error("Enter a target ticker.")
+        else:
+            with st.spinner(f"Analyzing competitors for {target_ticker}..."):
+                discovery_engine = CompetitorDiscoveryEngine(api_key=api_key)
+                result = discovery_engine.find_competitors(target_ticker)
+                
+                if "error" in result:
+                    st.error(f"Error: {result['error']}")
+                else:
+                    st.session_state['competitor_results'] = result
+                    st.success("Analysis Complete!")
+
+    if 'competitor_results' in st.session_state:
+        res = st.session_state['competitor_results']
+        
+        st.markdown("**Direct Competitors**")
+        selected_direct = []
+        for comp in res.get("direct", []):
+            if st.checkbox(f"{comp['ticker']} ({comp['name']})", key=f"chk_{comp['ticker']}"):
+                selected_direct.append(comp['ticker'])
+        
+        st.markdown("**Broad Competitors**")
+        selected_broad = []
+        for comp in res.get("broad", []):
+            if st.checkbox(f"{comp['ticker']} ({comp['name']})", key=f"chk_{comp['ticker']}"):
+                selected_broad.append(comp['ticker'])
+                
+        if st.button("Add Selected to Analysis"):
+            new_tickers = selected_direct + selected_broad
+            current_list = [t.strip() for t in st.session_state['ticker_input_str'].split(",") if t.strip()]
+            
+            # Append unique new tickers
+            added_count = 0
+            for t in new_tickers:
+                if t not in current_list:
+                    current_list.append(t)
+                    added_count += 1
+            
+            # Update session state
+            st.session_state['ticker_input_str'] = ", ".join(current_list)
+            st.rerun()
 
 if st.sidebar.button("Run Analysis", type="primary"):
     st.session_state['run_requested'] = True
 
 st.sidebar.markdown("---")
-st.sidebar.caption("v3.1 - Self-Contained")
+st.sidebar.caption("v3.2 - AI Enhanced")
 
 
 # -------------------------------------------------------------------------
 # Main Logic
 # -------------------------------------------------------------------------
 if st.session_state.get('run_requested', False):
-    if not tickers_input:
+    if not tickers_text:
         st.error("Enter tickers.")
     else:
-        t_list = [t.strip() for t in tickers_input.split(",") if t.strip()]
+        t_list = [t.strip() for t in tickers_text.split(",") if t.strip()]
         with st.spinner("Requesting analysis from backend..."):
             data = get_data(t_list)
             if data:

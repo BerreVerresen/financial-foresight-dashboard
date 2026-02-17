@@ -5,4 +5,6 @@ requests
 numpy
 yfinance
 matplotlib
+openai
+python-dotenv
 
