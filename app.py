@@ -377,7 +377,7 @@ if 'data' in st.session_state:
         else:
             # --- Gauge View (Industry Benchmark style) ---
             # Metrics where LOWER is better (inverted color logic)
-            lower_is_better = {"CCC (Days)", "DIO (Days)", "DSO (Days)", "DPO (Days)", 
+            lower_is_better = {"CCC (Days)", "DIO (Days)", "DSO (Days)", 
                                "Net Debt / EBITDA", "Debt / Equity", "Financial Leverage"}
             
             cols = st.columns(3)
