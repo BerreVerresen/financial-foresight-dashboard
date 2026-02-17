@@ -219,6 +219,14 @@ class BenchmarkingEngine:
                 "DSO (Days)": round(dso, 1),
                 "DPO (Days)": round(dpo, 1),
                 
+                # Liquidity
+                "Current Ratio": round(safe_div(get_latest_any(bs, ["Total Current Assets", "CurrentAssets"]), get_latest_any(bs, ["Total Current Liabilities", "CurrentLiabilities"])), 2),
+                "Quick Ratio": round(safe_div(
+                    (get_latest_any(bs, ["Total Current Assets", "CurrentAssets"]) - get_latest(bs, "Inventory")), 
+                    get_latest_any(bs, ["Total Current Liabilities", "CurrentLiabilities"])
+                ), 2),
+                "Cash Ratio": round(safe_div(cash, get_latest_any(bs, ["Total Current Liabilities", "CurrentLiabilities"])), 2),
+
                 # Returns
                 "ROIC %": round(roic * 100, 1),
                 "ROE %": round(roe * 100, 1),
@@ -226,6 +234,7 @@ class BenchmarkingEngine:
                 # Solvency
                 "Net Debt / EBITDA": round(net_debt_ebitda, 2),
                 "Interest Coverage": round(interest_coverage, 2),
+                "Debt / Equity": round(safe_div(debt, equity), 2),
                 
                 # Quality & Allocation
                 "FCF Conversion %": round(fcf_conversion * 100, 1),

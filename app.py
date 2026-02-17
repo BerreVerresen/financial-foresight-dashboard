@@ -253,13 +253,28 @@ if 'data' in st.session_state:
     with tabs[0]:
         st.subheader("Comparative Analysis")
         
+        # Focus Selector
+        focus_mode = st.radio("Benchmark Focus", ["Overview", "Liquidity", "Solvency", "Efficiency", "Returns"], horizontal=True)
+        
+        # Define Metrics per Focus
+        metric_groups = {
+            "Overview": ["Revenue ($B)", "Revenue CAGR (3y)", "Gross Margin %", "EBITDA Margin %", "Net Margin %", "ROIC %", "CCC (Days)"],
+            "Liquidity": ["Current Ratio", "Quick Ratio", "Cash Ratio", "CCC (Days)", "DIO (Days)", "DSO (Days)", "DPO (Days)"],
+            "Solvency": ["Net Debt / EBITDA", "Interest Coverage", "Debt / Equity", "Financial Leverage", "Quick Ratio"],
+            "Efficiency": ["Asset Turnover", "ROIC %", "ROE %", "Fixed Asset Turnover", "CCC (Days)"],
+            "Returns": ["ROE %", "ROIC %", "Shareholder Yield %", "Net Margin %", "Dupont ROE"]
+        }
+        
+        # Fallback to Overview if key missing
+        metrics_to_show = metric_groups.get(focus_mode, metric_groups["Overview"])
+        
         # A. Heatmap Matrix
-        with st.expander("Heatmap View", expanded=False):
-            metrics_to_show = ["Revenue ($B)", "Revenue CAGR (3y)", "Gross Margin %", "EBITDA Margin %", "Net Margin %", "ROIC %", "CCC (Days)", "Net Debt / EBITDA"]
+        with st.expander(f"Heatmap View ({focus_mode})", expanded=True):
             matrix = []
             for c in companies:
                 row = {"Ticker": c['ticker']}
                 for m in metrics_to_show:
+                    # Handle missing keys gracefully
                     row[m] = c['metrics'].get(m, 0)
                 matrix.append(row)
             
@@ -270,20 +285,13 @@ if 'data' in st.session_state:
             )
             
         # B. Individual KPI Graphics
-        st.markdown("### Key Performance Indicators")
+        st.markdown(f"### Key {focus_mode} Indicators")
         
-        # Define layout (3 columns)
+        # Dynamic Grid based on Selection
+        # Use 3 cols
         cols = st.columns(3)
-        metrics_grid = [
-            ("Growth", ["Revenue ($B)", "Revenue CAGR (3y)"]),
-            ("Profitability", ["Gross Margin %", "EBITDA Margin %", "Net Margin %"]),
-            ("Efficiency", ["ROIC %", "CCC (Days)", "Net Debt / EBITDA"])
-        ]
         
-        # Flatten the list for grid iteration
-        all_metrics = [m for cat, ms in metrics_grid for m in ms]
-        
-        for i, metric in enumerate(all_metrics):
+        for i, metric in enumerate(metrics_to_show):
             col = cols[i % 3]
             with col:
                 # Prepare Data for Chart
@@ -391,14 +399,14 @@ if 'data' in st.session_state:
         else:
             st.warning("No data available for this statement.")
 
-    # 4. Advanced Sandbox
+    # 4. Advanced Sandbox 2.0
     with tabs[3]:
-        st.subheader("🧪 Formula Sandbox")
-        st.info("Combine ANY metric or raw data point. Try 'Total Revenue' / 'Full Time Employees'.")
-        
+        st.subheader("🧪 Sandbox 2.0: Formula Engine")
+        st.caption("Build custom KPIs using free-form arithmetic. Search variables below to see their names.")
+
+        # A. Variable Search (Helper)
+        # Collect all available keys from the focus company for autocomplete/reference
         sample_metrics = list(focus_company['metrics'].keys())
-        
-        # Get raw keys
         raw_keys = []
         try:
             inc = focus_company['raw_data']['financials']['annual']['income_statement']
@@ -407,39 +415,101 @@ if 'data' in st.session_state:
             raw_keys.extend(list(bs.keys()))
         except: pass
         
-        available_fields = sorted(list(set(sample_metrics + raw_keys)))
+        all_options = sorted(list(set(sample_metrics + raw_keys)))
         
-        c1, c2, c3, c4 = st.columns([3, 1, 3, 2])
-        var_a = c1.selectbox("Variable A", options=available_fields, index=0)
-        op = c2.selectbox("Op", ["/", "*", "+", "-"])
-        var_b = c3.selectbox("Variable B", options=available_fields, index=min(1, len(available_fields)-1))
+        selected_vars = st.multiselect("🔍 Search Variables (Copy-Paste names below)", options=all_options)
         
-        new_name = c4.text_input("Name Result", value="Custom Metric")
-        
-        if st.button("Calculate Custom Metric"):
-            res_data = []
-            for c in companies:
-                val_a = get_value_for_ticker(companies, c['ticker'], var_a)
-                val_b = get_value_for_ticker(companies, c['ticker'], var_b)
-                
-                res = None
-                try:
-                    if op == "/": res = val_a / val_b if val_b else 0
-                    elif op == "*": res = val_a * val_b
-                    elif op == "+": res = val_a + val_b
-                    elif op == "-": res = val_a - val_b
-                except: res = 0
-                
-                res_data.append({"Ticker": c['ticker'], new_name: res, f"{var_a}": val_a, f"{var_b}": val_b})
+        if selected_vars:
+            st.code("Assignments:\n" + "\n".join([f"'{v}'" for v in selected_vars]), language="python")
+
+        # B. Formula Input
+        c1, c2 = st.columns([3, 1])
+        with c1:
+            formula = st.text_input("Formula", placeholder="e.g. ('Total Revenue' - 'Cost Of Revenue') / 'Full Time Employees'", help="Use single quotes for variable names.")
+        with c2:
+            metric_name = st.text_input("Metric Name", value="My Custom KPI")
             
-            df_res = pd.DataFrame(res_data).set_index("Ticker")
-            
-            s1, s2 = st.columns([1, 2])
-            with s1:
-                st.dataframe(df_res)
-            with s2:
-                fig = px.bar(df_res, x=df_res.index, y=new_name, color=df_res.index, title=new_name)
-                st.plotly_chart(fig, use_container_width=True)
+        st.info("💡 Tip: Use `+`, `-`, `*`, `/`, and `()` for logic. wrap variable names in single quotes `'`.")
+
+        if st.button("Calculate", type="primary"):
+            if not formula:
+                st.error("Enter a formula.")
+            else:
+                results = []
+                
+                # Evaluation Logic
+                for c in companies:
+                    # Create a safe local dictionary for evaluations
+                    # We need to flattening the company data so that keys are direct variables
+                    local_vars = {}
+                    
+                    # Add computed metrics
+                    for k, v in c['metrics'].items():
+                        local_vars[k] = v
+                        
+                    # Add raw data (deep search for keys in formula)
+                    # Optimization: Only fetch keys present in formula text
+                    # Simple regex or string check
+                    # For now, let's just dynamic lookup inside eval using a custom class or pre-calc?
+                    # Pre-calc is safer.
+                    
+                    # We will support the variable names provided in 'all_options'
+                    # But we can't pre-load 500 variables.
+                    # Strategy: Regex parse the formula for quoted strings?
+                    import re
+                    # Find all strings inside single quotes
+                    needed_vars = re.findall(r"'(.*?)'", formula)
+                    
+                    safe_eval_dict = {}
+                    missing = []
+                    
+                    for v_name in needed_vars:
+                        val = get_value_for_ticker(companies, c['ticker'], v_name)
+                        safe_eval_dict[v_name] = val
+                    
+                    # Replace user's 'Var Name' with Python valid identifiers or dictionary lookups?
+                    # Python `eval` with a dict works if names are valid IDs. but 'Total Revenue' is not.
+                    # We can leave them as strings if we use pandas eval? No.
+                    # Simplest: Replace 'Var Name' in the string with `locals['Var Name']`?
+                    
+                    # Let's try: Replace 'Var Name' with a temp placeholder `_var_0`, `_var_1`...
+                    
+                    eval_formula = formula
+                    eval_context = {}
+                    
+                    for idx, v_name in enumerate(needed_vars):
+                        placeholder = f"__v{idx}__"
+                        eval_formula = eval_formula.replace(f"'{v_name}'", placeholder)
+                        eval_context[placeholder] = safe_eval_dict[v_name]
+                    
+                    try:
+                        # Safe arithmetic eval
+                        # Allow only basic math?
+                        final_val = eval(eval_formula, {"__builtins__": None}, eval_context)
+                        results.append({
+                            "Ticker": c['ticker'],
+                            metric_name: float(final_val),
+                            "Debug": str(eval_context)
+                        })
+                    except Exception as e:
+                        results.append({
+                            "Ticker": c['ticker'],
+                            metric_name: 0.0,
+                            "Debug": f"Error: {str(e)}"
+                        })
+                
+                df_res = pd.DataFrame(results).set_index("Ticker")
+                
+                s1, s2 = st.columns([1, 2])
+                with s1:
+                    st.dataframe(df_res[[metric_name]])
+                with s2:
+                    fig = px.bar(
+                        df_res, x=df_res.index, y=metric_name, 
+                        color=df_res.index, title=metric_name,
+                        color_discrete_sequence=px.colors.qualitative.Pastel
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
 
     # 5. Deep Dive Table
     with tabs[4]:
