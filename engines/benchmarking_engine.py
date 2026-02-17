@@ -187,16 +187,17 @@ class BenchmarkingEngine:
         # Market Data
         # Note: Universal Extraction puts stock.info into "meta"
         meta = data.get("meta", {})
-        mkt_cap = meta.get("marketCap", 0)
         
-        # Fallback if 0
-        if not mkt_cap: mkt_cap = meta.get("market_cap", 0)
-
-        ev = mkt_cap + net_debt
-        pe_ratio = meta.get("trailingPE", 0.0)
+        # Safe Metadata Extraction (Handle None values explicitly)
+        mkt_cap = meta.get("marketCap") or meta.get("market_cap") or 0
         
-        # PE fallback to Forward if Trailing is missing
-        if not pe_ratio: pe_ratio = meta.get("forwardPE", 0.0)
+        # Enterprise Value
+        # Net Debt = Debt - Cash. If None, assume 0.
+        net_debt_val = net_debt if net_debt is not None else 0
+        ev = mkt_cap + net_debt_val
+        
+        # P/E Ratio
+        pe_ratio = meta.get("trailingPE") or meta.get("forwardPE") or 0.0
 
         ev_ebitda = safe_div(ev, ebitda)
 
@@ -244,14 +245,14 @@ class BenchmarkingEngine:
                 "Shareholder Yield %": round(shareholder_yield * 100, 1),
                 
                 # Expert: Governance & Risks (from Meta)
-                "Audit Risk": meta.get('auditRisk', 0),
-                "Board Risk": meta.get('boardRisk', 0),
-                "Compensation Risk": meta.get('compensationRisk', 0),
-                "Shareholder Rights Risk": meta.get('shareholderRightsRisk', 0),
-                "Overall Risk": meta.get('overallRisk', 0),
-                "Beta": round(meta.get('beta', 0) if meta.get('beta') else 0, 2),
-                "Inst. Ownership %": round(meta.get('heldPercentInstitutions', 0) * 100, 1),
-                "Insider Ownership %": round(meta.get('heldPercentInsiders', 0) * 100, 1),
+                "Audit Risk": meta.get('auditRisk') or 0,
+                "Board Risk": meta.get('boardRisk') or 0,
+                "Compensation Risk": meta.get('compensationRisk') or 0,
+                "Shareholder Rights Risk": meta.get('shareholderRightsRisk') or 0,
+                "Overall Risk": meta.get('overallRisk') or 0,
+                "Beta": round(meta.get('beta') if meta.get('beta') else 0, 2),
+                "Inst. Ownership %": round((meta.get('heldPercentInstitutions') or 0) * 100, 1),
+                "Insider Ownership %": round((meta.get('heldPercentInsiders') or 0) * 100, 1),
                 
                 # Company Profile (Hidden from Heatmap, used in Deep Dive)
                 "Profile": {
@@ -285,18 +286,35 @@ class BenchmarkingEngine:
         first_metrics = results[0]["metrics"]
         
         for k in first_metrics.keys():
-            metrics_lists[k] = [r["metrics"].get(k, 0.0) for r in results]
+            # Skip non-numeric fields like Profile
+            if k == "Profile": continue
+            
+            # Robust get: Handle missing key AND None value
+            # If value is string (e.g. "Low"), this might fail later in np.mean, caught by try/except
+            metrics_lists[k] = [(r["metrics"].get(k) or 0.0) for r in results]
 
         stats = {}
         for k, values in metrics_lists.items():
-            # Filter out pure zeros if they seem like errors? No, keep them for now.
-            arr = np.array(values)
-            stats[k] = {
-                "avg": round(float(np.mean(arr)), 2),
-                "median": round(float(np.median(arr)), 2),
-                "min": round(float(np.min(arr)), 2),
-                "max": round(float(np.max(arr)), 2)
-            }
+            try:
+                # Filter out pure zeros if they seem like errors? No, keep them for now.
+                # Ensure values are numeric
+                numeric_values = [float(v) for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
+                
+                if not numeric_values:
+                    stats[k] = {"avg": 0, "median": 0, "min": 0, "max": 0}
+                    continue
+                    
+                arr = np.array(numeric_values)
+                stats[k] = {
+                    "avg": round(float(np.mean(arr)), 2),
+                    "median": round(float(np.median(arr)), 2),
+                    "min": round(float(np.min(arr)), 2),
+                    "max": round(float(np.max(arr)), 2)
+                }
+            except Exception as e:
+                # If metric is text-based or fails
+                # print(f"Skipping stats for {k}: {e}")
+                stats[k] = {"avg": 0, "median": 0, "min": 0, "max": 0}
             
         return stats
 
