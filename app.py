@@ -183,20 +183,32 @@ with st.sidebar.expander("🤖 Find Competitors (AI)", expanded=False):
             if st.checkbox(f"{comp['ticker']} ({comp['name']})", key=f"chk_{comp['ticker']}"):
                 selected_broad.append(comp['ticker'])
                 
-        if st.button("Add Selected to Analysis"):
-            new_tickers = selected_direct + selected_broad
-            current_list = [t.strip() for t in st.session_state['ticker_input_str'].split(",") if t.strip()]
+        def add_selected_competitors():
+            """Callback to update ticker list from selected checkboxes."""
+            res = st.session_state.get('competitor_results', {})
+            new_tickers = []
             
-            # Append unique new tickers
-            added_count = 0
+            # Collect from Direct
+            for comp in res.get("direct", []):
+                if st.session_state.get(f"chk_{comp['ticker']}", False):
+                    new_tickers.append(comp['ticker'])
+            
+            # Collect from Broad
+            for comp in res.get("broad", []):
+                if st.session_state.get(f"chk_{comp['ticker']}", False):
+                    new_tickers.append(comp['ticker'])
+            
+            # Merge with existing
+            current_str = st.session_state.get('ticker_input_str', "")
+            current_list = [t.strip() for t in current_str.split(",") if t.strip()]
+            
             for t in new_tickers:
                 if t not in current_list:
                     current_list.append(t)
-                    added_count += 1
             
-            # Update session state
             st.session_state['ticker_input_str'] = ", ".join(current_list)
-            st.rerun()
+
+        st.button("Add Selected to Analysis", on_click=add_selected_competitors)
 
 if st.sidebar.button("Run Analysis", type="primary"):
     st.session_state['run_requested'] = True
