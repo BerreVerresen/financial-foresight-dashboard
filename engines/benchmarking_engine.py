@@ -7,8 +7,8 @@ from datetime import datetime
 import sys
 import os
 
-# Import sibling module
-from engines.financial_analytics import FinancialAnalyticsEngine
+# Import sibling module (relative import for package compatibility)
+from .financial_analytics import FinancialAnalyticsEngine
 
 class BenchmarkingEngine:
     """
