@@ -559,7 +559,28 @@ if 'data' in st.session_state:
     with tabs[4]:
         st.subheader("📑 Expert Deep Dive")
         
-        # A. Governance & Risk Scorecard
+        # A. Company Profile
+        st.markdown(f"### 🏢 Company Profile: {focus_company['metrics'].get('Profile', {}).get('Summary', '')[:100]}...")
+        
+        prof = focus_company['metrics'].get('Profile', {})
+        
+        p_c1, p_c2, p_c3 = st.columns(3)
+        with p_c1:
+            st.markdown(f"**Sector**: {prof.get('Sector', 'N/A')}")
+            st.markdown(f"**Industry**: {prof.get('Industry', 'N/A')}")
+        with p_c2:
+            st.markdown(f"**Employees**: {prof.get('Employees', 'N/A')}")
+            st.markdown(f"**HQ**: {prof.get('City', '')}, {prof.get('Country', '')}")
+        with p_c3:
+            web = prof.get('Website', '#')
+            st.markdown(f"**Website**: [{web}]({web})")
+            
+        with st.expander("Full Business Summary", expanded=False):
+            st.write(prof.get('Summary', 'No summary available.'))
+            
+        st.divider()
+        
+        # B. Governance & Risk Scorecard
         st.markdown("### 🏛️ Governance & Risk")
         gov_cols = st.columns(4)
         
@@ -578,43 +599,6 @@ if 'data' in st.session_state:
         with gov_cols[3]:
              st.metric("Beta", m.get('Beta', 0))
              
-        st.divider()
-
-        # B. Rule of 40 Analysis
-        st.markdown("### 🦄 Rule of 40 (SaaS Valuation)")
-        st.caption("Growth + Profitability (FCF Margin). >40% is elite.")
-        
-        r40_data = []
-        for c in companies:
-            r40_data.append({
-                "Ticker": c['ticker'],
-                "Revenue Growth %": c['metrics'].get('Revenue CAGR (3y)', 0),
-                "FCF Margin %": c['metrics'].get('FCF Margin %', 0),
-                "Rule of 40": c['metrics'].get('Rule of 40', 0)
-            })
-        
-        df_r40 = pd.DataFrame(r40_data)
-        
-        fig_r40 = px.scatter(
-            df_r40,
-            x="Revenue Growth %",
-            y="FCF Margin %",
-            text="Ticker",
-            color="Rule of 40",
-            title="Rule of 40 Map",
-            color_continuous_scale="RdYlGn",
-            range_color=[0, 60]
-        )
-        # Add 40% line
-        # Simple diagonal line y = 40 - x
-        x_range = np.linspace(df_r40["Revenue Growth %"].min()-5, df_r40["Revenue Growth %"].max()+5, 100)
-        y_line = 40 - x_range
-        fig_r40.add_trace(go.Scatter(x=x_range, y=y_line, mode='lines', name='Rule of 40 Line', line=dict(dash='dash', color='red')))
-        
-        fig_r40.update_traces(textposition='top center')
-        fig_r40.update_layout(height=500)
-        st.plotly_chart(fig_r40, use_container_width=True)
-        
         st.divider()
 
         # C. Capital Allocation Bridge (Cash Flow)

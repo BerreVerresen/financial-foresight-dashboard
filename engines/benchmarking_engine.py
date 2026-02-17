@@ -243,19 +243,26 @@ class BenchmarkingEngine:
                 "R&D Intensity %": round(safe_div(rnd, rev) * 100, 1),
                 "Shareholder Yield %": round(shareholder_yield * 100, 1),
                 
-                # Expert: Rule of 40
-                "FCF Margin %": round(safe_div(fcf, rev) * 100, 1),
-                "Rule of 40": round((revenue_cagr * 100) + (safe_div(fcf, rev) * 100), 1),
-                
                 # Expert: Governance & Risks (from Meta)
-                "Audit Risk": meta.get('auditRisk', None),
-                "Board Risk": meta.get('boardRisk', None),
-                "Compensation Risk": meta.get('compensationRisk', None),
-                "Shareholder Rights Risk": meta.get('shareholderRightsRisk', None),
-                "Overall Risk": meta.get('overallRisk', None),
-                "Beta": round(meta.get('beta', 0), 2),
+                "Audit Risk": meta.get('auditRisk', 0),
+                "Board Risk": meta.get('boardRisk', 0),
+                "Compensation Risk": meta.get('compensationRisk', 0),
+                "Shareholder Rights Risk": meta.get('shareholderRightsRisk', 0),
+                "Overall Risk": meta.get('overallRisk', 0),
+                "Beta": round(meta.get('beta', 0) if meta.get('beta') else 0, 2),
                 "Inst. Ownership %": round(meta.get('heldPercentInstitutions', 0) * 100, 1),
                 "Insider Ownership %": round(meta.get('heldPercentInsiders', 0) * 100, 1),
+                
+                # Company Profile (Hidden from Heatmap, used in Deep Dive)
+                "Profile": {
+                    "Summary": meta.get('longBusinessSummary') or meta.get('description', 'No description available.'),
+                    "Sector": meta.get('sector', 'N/A'),
+                    "Industry": meta.get('industry', 'N/A'),
+                    "Employees": meta.get('fullTimeEmployees', 'N/A'),
+                    "City": meta.get('city', 'N/A'),
+                    "Country": meta.get('country', 'N/A'),
+                    "Website": meta.get('website', 'N/A')
+                },
 
                 # DuPont Drivers
                 "Asset Turnover": round(safe_div(rev, get_latest_any(bs, ["Total Assets", "TotalAssets"])), 2),
