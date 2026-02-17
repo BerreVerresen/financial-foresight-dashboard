@@ -413,16 +413,16 @@ if 'data' in st.session_state:
                     if metric in lower_is_better:
                         bar_color = "#4ade80" if focus_val <= cohort_avg else "#f87171"
                         steps = [
-                            {"range": [gauge_min, gauge_min + (gauge_max - gauge_min) * 0.33], "color": "rgba(74, 222, 128, 0.15)"},
-                            {"range": [gauge_min + (gauge_max - gauge_min) * 0.33, gauge_min + (gauge_max - gauge_min) * 0.66], "color": "rgba(250, 204, 21, 0.15)"},
-                            {"range": [gauge_min + (gauge_max - gauge_min) * 0.66, gauge_max], "color": "rgba(248, 113, 113, 0.15)"},
+                            {"range": [gauge_min, gauge_min + (gauge_max - gauge_min) * 0.33], "color": "rgba(74, 222, 128, 0.25)"},
+                            {"range": [gauge_min + (gauge_max - gauge_min) * 0.33, gauge_min + (gauge_max - gauge_min) * 0.66], "color": "rgba(250, 204, 21, 0.25)"},
+                            {"range": [gauge_min + (gauge_max - gauge_min) * 0.66, gauge_max], "color": "rgba(248, 113, 113, 0.25)"},
                         ]
                     else:
                         bar_color = "#4ade80" if focus_val >= cohort_avg else "#f87171"
                         steps = [
-                            {"range": [gauge_min, gauge_min + (gauge_max - gauge_min) * 0.33], "color": "rgba(248, 113, 113, 0.15)"},
-                            {"range": [gauge_min + (gauge_max - gauge_min) * 0.33, gauge_min + (gauge_max - gauge_min) * 0.66], "color": "rgba(250, 204, 21, 0.15)"},
-                            {"range": [gauge_min + (gauge_max - gauge_min) * 0.66, gauge_max], "color": "rgba(74, 222, 128, 0.15)"},
+                            {"range": [gauge_min, gauge_min + (gauge_max - gauge_min) * 0.33], "color": "rgba(248, 113, 113, 0.25)"},
+                            {"range": [gauge_min + (gauge_max - gauge_min) * 0.33, gauge_min + (gauge_max - gauge_min) * 0.66], "color": "rgba(250, 204, 21, 0.25)"},
+                            {"range": [gauge_min + (gauge_max - gauge_min) * 0.66, gauge_max], "color": "rgba(74, 222, 128, 0.25)"},
                         ]
                     
                     # Format number for display
@@ -454,7 +454,7 @@ if 'data' in st.session_state:
                             "borderwidth": 0,
                             "steps": steps,
                             "threshold": {
-                                "line": {"color": "#f8fafc", "width": 2},
+                                "line": {"color": "#f97316", "width": 3},
                                 "thickness": 0.8,
                                 "value": cohort_avg
                             }
@@ -465,7 +465,6 @@ if 'data' in st.session_state:
                         height=200,
                         margin=dict(l=20, r=20, t=50, b=10),
                         paper_bgcolor='rgba(0,0,0,0)',
-                        font=dict(color="#e2e8f0"),
                     )
                     st.plotly_chart(fig, use_container_width=True)
 
