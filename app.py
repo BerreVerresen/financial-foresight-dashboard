@@ -374,10 +374,17 @@ if 'data' in st.session_state:
             "Dividend Yield %": {"formula": "Annual Dividends Per Share / Share Price × 100", "meaning": "Annual dividend income as % of share price.", "source": "Market Data"},
         }
         
-        view_mode = st.radio("View", ["📊 Bar Charts", "🎯 Gauge View"], horizontal=True, key="chart_view_mode")
+        view_mode = st.radio("View", ["📊 Bar Charts", "🎯 Gauge View", "📈 Over Time"], horizontal=True, key="chart_view_mode")
+        
+        # Helper: get formula caption string
+        def formula_caption(metric):
+            if metric in kpi_formulas:
+                f = kpi_formulas[metric]
+                return f"*{f['formula']}* — {f['meaning']}"
+            return ""
         
         if view_mode == "📊 Bar Charts":
-            # --- Bar Chart View (original) ---
+            # --- Bar Chart View ---
             cols = st.columns(3)
             for i, metric in enumerate(metrics_to_show):
                 col = cols[i % 3]
@@ -406,32 +413,25 @@ if 'data' in st.session_state:
                         xaxis=dict(showgrid=False)
                     )
                     st.plotly_chart(fig, use_container_width=True)
-                    
-                    # Formula popover
-                    if metric in kpi_formulas:
-                        f = kpi_formulas[metric]
-                        with st.popover(f"ℹ️ {metric}"):
-                            st.markdown(f"**Formula:** `{f['formula']}`")
-                            st.markdown(f"**What it means:** {f['meaning']}")
-                            st.caption(f"Source: {f['source']}")
+                    fc = formula_caption(metric)
+                    if fc:
+                        with st.expander("ℹ️", expanded=False):
+                            st.caption(fc)
         
-        else:
+        elif view_mode == "🎯 Gauge View":
             # --- Gauge View (Industry Benchmark style — Premium) ---
             lower_is_better = {"CCC (Days)", "DIO (Days)", "DSO (Days)", 
                                "Net Debt / EBITDA", "Debt / Equity", "Financial Leverage"}
             
-            # 2 columns for more breathing room
             for row_start in range(0, len(metrics_to_show), 2):
                 row_metrics = metrics_to_show[row_start:row_start + 2]
                 gauge_cols = st.columns(len(row_metrics))
                 
                 for g_idx, metric in enumerate(row_metrics):
                     with gauge_cols[g_idx]:
-                        # Get focus company value
                         focus_val = focus_company['metrics'].get(metric, 0)
                         if focus_val is None: focus_val = 0
                         
-                        # Get cohort values for range and average
                         cohort_vals = [c['metrics'].get(metric, 0) for c in companies]
                         cohort_vals = [v for v in cohort_vals if v is not None]
                         if not cohort_vals: cohort_vals = [0]
@@ -440,7 +440,6 @@ if 'data' in st.session_state:
                         cohort_min = min(cohort_vals)
                         cohort_max = max(cohort_vals)
                         
-                        # Dynamic range with padding
                         spread = abs(cohort_max - cohort_min)
                         range_pad = max(spread * 0.3, abs(cohort_avg) * 0.2, 0.5)
                         gauge_min = min(cohort_min, focus_val) - range_pad
@@ -449,24 +448,19 @@ if 'data' in st.session_state:
                         if "Ratio" in metric or "Turnover" in metric or "Coverage" in metric:
                             gauge_min = max(0, gauge_min)
                         
-                        # 5-zone smooth gradient for refined look
                         rng = gauge_max - gauge_min
                         if metric in lower_is_better:
                             bar_color = "#22c55e" if focus_val <= cohort_avg else "#ef4444"
                             zone_colors = [
-                                "rgba(34, 197, 94, 0.3)",   # green
-                                "rgba(132, 204, 22, 0.2)",  # lime
-                                "rgba(234, 179, 8, 0.2)",   # yellow
-                                "rgba(249, 115, 22, 0.2)",  # orange
-                                "rgba(239, 68, 68, 0.3)",   # red
+                                "rgba(34, 197, 94, 0.3)", "rgba(132, 204, 22, 0.2)",
+                                "rgba(234, 179, 8, 0.2)", "rgba(249, 115, 22, 0.2)",
+                                "rgba(239, 68, 68, 0.3)",
                             ]
                         else:
                             bar_color = "#22c55e" if focus_val >= cohort_avg else "#ef4444"
                             zone_colors = [
-                                "rgba(239, 68, 68, 0.3)",
-                                "rgba(249, 115, 22, 0.2)",
-                                "rgba(234, 179, 8, 0.2)",
-                                "rgba(132, 204, 22, 0.2)",
+                                "rgba(239, 68, 68, 0.3)", "rgba(249, 115, 22, 0.2)",
+                                "rgba(234, 179, 8, 0.2)", "rgba(132, 204, 22, 0.2)",
                                 "rgba(34, 197, 94, 0.3)",
                             ]
                         
@@ -478,51 +472,162 @@ if 'data' in st.session_state:
                             title={"text": f"<b style='font-size:15px'>{metric}</b><br><span style='font-size:12px;color:#888'>{focus_ticker} vs cohort avg</span>", "font": {"size": 16}},
                             number={"font": {"size": 36, "color": bar_color}, "valueformat": ",.2f" if abs(focus_val) < 100 else ",.0f"},
                             delta={
-                                "reference": cohort_avg,
-                                "relative": False,
-                                "valueformat": ".2f",
+                                "reference": cohort_avg, "relative": False, "valueformat": ".2f",
                                 "increasing": {"color": "#22c55e" if metric not in lower_is_better else "#ef4444"},
                                 "decreasing": {"color": "#ef4444" if metric not in lower_is_better else "#22c55e"},
-                                "suffix": " vs avg",
-                                "font": {"size": 13}
+                                "suffix": " vs avg", "font": {"size": 13}
                             },
                             gauge={
                                 "shape": "angular",
                                 "axis": {"range": [gauge_min, gauge_max], "tickfont": {"size": 11}, "tickcolor": "#888"},
                                 "bar": {"color": bar_color, "thickness": 0.4},
                                 "bgcolor": "rgba(128,128,128,0.08)",
-                                "borderwidth": 1,
-                                "bordercolor": "rgba(128,128,128,0.15)",
+                                "borderwidth": 1, "bordercolor": "rgba(128,128,128,0.15)",
                                 "steps": steps,
-                                "threshold": {
-                                    "line": {"color": "#f97316", "width": 4},
-                                    "thickness": 0.85,
-                                    "value": cohort_avg
-                                }
+                                "threshold": {"line": {"color": "#f97316", "width": 4}, "thickness": 0.85, "value": cohort_avg}
                             }
                         ))
                         
-                        fig.update_layout(
-                            height=280,
-                            margin=dict(l=30, r=30, t=80, b=20),
-                            paper_bgcolor='rgba(0,0,0,0)',
-                        )
+                        fig.update_layout(height=280, margin=dict(l=30, r=30, t=80, b=20), paper_bgcolor='rgba(0,0,0,0)')
                         st.plotly_chart(fig, use_container_width=True)
                         
-                        # Cohort avg label + formula popover side by side
-                        info_cols = st.columns([1, 1])
-                        with info_cols[0]:
-                            st.caption(f"🟠 Cohort avg: **{cohort_avg:.2f}**")
-                        with info_cols[1]:
-                            if metric in kpi_formulas:
-                                f = kpi_formulas[metric]
-                                with st.popover("ℹ️ Formula"):
-                                    st.markdown(f"**{metric}**")
-                                    st.code(f['formula'], language=None)
-                                    st.markdown(f"{f['meaning']}")
-                                    st.caption(f"📊 Source: {f['source']}")
-                        
+                        # Clean info line: cohort avg + formula in one caption
+                        fc = formula_caption(metric)
+                        caption_text = f"🟠 Cohort avg: **{cohort_avg:.2f}**"
+                        st.caption(caption_text)
+                        if fc:
+                            with st.expander("ℹ️", expanded=False):
+                                st.caption(fc)
                         st.markdown("---")
+        
+        else:
+            # --- Over Time View (Focus company metrics across years) ---
+            st.caption(f"📈 Showing **{focus_ticker}** metrics computed from annual financial statements over the last 5 years.")
+            
+            raw = focus_company.get('raw_data', {}).get('financials', {}).get('annual', {})
+            inc = raw.get('income_statement', {})
+            bs = raw.get('balance_sheet', {})
+            cf = raw.get('cash_flow', {})
+            
+            def safe_div_ts(a, b):
+                if a is None or b is None or b == 0: return None
+                return a / b
+            
+            # Get all available years from income statement
+            rev_key = next((k for k in ["Total Revenue", "TotalRevenue", "Operating Revenue", "Revenue"] if k in inc), None)
+            if rev_key and inc[rev_key]:
+                all_years = sorted(inc[rev_key].keys())[-5:]
+            else:
+                all_years = []
+                st.warning("No annual revenue data available for time series.")
+            
+            if all_years:
+                def get_val(stmt, keys, year):
+                    """Get a value for a specific year from a statement, trying multiple key names."""
+                    if isinstance(keys, str): keys = [keys]
+                    for k in keys:
+                        if k in stmt and stmt[k] and year in stmt[k]:
+                            return stmt[k][year]
+                    return None
+                
+                # Compute KPIs per year
+                kpi_time_series = {}
+                
+                # Map metric names to computation functions
+                metric_computations = {
+                    "Revenue ($B)": lambda y: (get_val(inc, ["Total Revenue", "TotalRevenue", "Operating Revenue", "Revenue"], y) or 0) / 1e9,
+                    "Gross Margin %": lambda y: (safe_div_ts(
+                        (get_val(inc, ["Total Revenue", "TotalRevenue", "Operating Revenue", "Revenue"], y) or 0) - (get_val(inc, "Cost Of Revenue", y) or 0),
+                        get_val(inc, ["Total Revenue", "TotalRevenue", "Operating Revenue", "Revenue"], y)) or 0) * 100,
+                    "EBITDA Margin %": lambda y: (safe_div_ts(get_val(inc, ["EBITDA", "Normalized EBITDA"], y), get_val(inc, ["Total Revenue", "TotalRevenue", "Operating Revenue", "Revenue"], y)) or 0) * 100,
+                    "Net Margin %": lambda y: (safe_div_ts(get_val(inc, ["Net Income", "NetIncome"], y), get_val(inc, ["Total Revenue", "TotalRevenue", "Operating Revenue", "Revenue"], y)) or 0) * 100,
+                    "Operating Margin %": lambda y: (safe_div_ts(get_val(inc, ["Operating Income", "OperatingIncome"], y), get_val(inc, ["Total Revenue", "TotalRevenue", "Operating Revenue", "Revenue"], y)) or 0) * 100,
+                    "Current Ratio": lambda y: safe_div_ts(get_val(bs, ["Current Assets", "Total Current Assets"], y), get_val(bs, ["Current Liabilities", "Total Current Liabilities"], y)) or 0,
+                    "Quick Ratio": lambda y: safe_div_ts((get_val(bs, ["Current Assets", "Total Current Assets"], y) or 0) - (get_val(bs, "Inventory", y) or 0), get_val(bs, ["Current Liabilities", "Total Current Liabilities"], y)) or 0,
+                    "Debt / Equity": lambda y: safe_div_ts(get_val(bs, "Total Debt", y), get_val(bs, ["Stockholders Equity", "Total Equity Gross Minority Interest"], y)) or 0,
+                    "ROE %": lambda y: (safe_div_ts(get_val(inc, ["Net Income", "NetIncome"], y), get_val(bs, ["Stockholders Equity", "Total Equity Gross Minority Interest"], y)) or 0) * 100,
+                    "ROA %": lambda y: (safe_div_ts(get_val(inc, ["Net Income", "NetIncome"], y), get_val(bs, ["Total Assets", "TotalAssets"], y)) or 0) * 100,
+                    "Asset Turnover": lambda y: safe_div_ts(get_val(inc, ["Total Revenue", "TotalRevenue", "Operating Revenue", "Revenue"], y), get_val(bs, ["Total Assets", "TotalAssets"], y)) or 0,
+                    "CCC (Days)": lambda y: (
+                        (safe_div_ts(get_val(bs, "Inventory", y), get_val(inc, "Cost Of Revenue", y)) or 0) * 365 +
+                        (safe_div_ts(get_val(bs, ["Receivables", "Accounts Receivable"], y), get_val(inc, ["Total Revenue", "TotalRevenue", "Operating Revenue", "Revenue"], y)) or 0) * 365 -
+                        (safe_div_ts(get_val(bs, ["Accounts Payable", "Payables"], y), get_val(inc, "Cost Of Revenue", y)) or 0) * 365
+                    ),
+                    "Net Debt / EBITDA": lambda y: safe_div_ts(
+                        (get_val(bs, "Net Debt", y) or ((get_val(bs, "Total Debt", y) or 0) - (get_val(bs, ["Cash And Cash Equivalents", "CashAndCashEquivalents"], y) or 0))),
+                        get_val(inc, ["EBITDA", "Normalized EBITDA"], y)) or 0,
+                    "Interest Coverage": lambda y: safe_div_ts(get_val(inc, ["EBIT", "Operating Income"], y), get_val(inc, "Interest Expense", y)) or 0,
+                    "ROIC %": lambda y: (safe_div_ts(
+                        (get_val(inc, ["EBIT", "Operating Income"], y) or 0) * 0.79,
+                        (get_val(bs, ["Stockholders Equity", "Total Equity Gross Minority Interest"], y) or 0) + (get_val(bs, "Total Debt", y) or 0) - (get_val(bs, ["Cash And Cash Equivalents", "CashAndCashEquivalents"], y) or 0)
+                    ) or 0) * 100,
+                    "DIO (Days)": lambda y: (safe_div_ts(get_val(bs, "Inventory", y), get_val(inc, "Cost Of Revenue", y)) or 0) * 365,
+                    "DSO (Days)": lambda y: (safe_div_ts(get_val(bs, ["Receivables", "Accounts Receivable"], y), get_val(inc, ["Total Revenue", "TotalRevenue", "Operating Revenue", "Revenue"], y)) or 0) * 365,
+                    "DPO (Days)": lambda y: (safe_div_ts(get_val(bs, ["Accounts Payable", "Payables"], y), get_val(inc, "Cost Of Revenue", y)) or 0) * 365,
+                }
+                
+                # Only compute for metrics currently shown
+                for metric in metrics_to_show:
+                    if metric in metric_computations:
+                        try:
+                            vals = [metric_computations[metric](y) for y in all_years]
+                            kpi_time_series[metric] = vals
+                        except: pass
+                
+                # Year labels
+                year_labels = [y[:4] for y in all_years]
+                
+                # Plot in a 2-column grid
+                computed_metrics = [m for m in metrics_to_show if m in kpi_time_series]
+                for row_start in range(0, len(computed_metrics), 2):
+                    row_metrics = computed_metrics[row_start:row_start + 2]
+                    ts_cols = st.columns(len(row_metrics))
+                    
+                    for t_idx, metric in enumerate(row_metrics):
+                        with ts_cols[t_idx]:
+                            vals = kpi_time_series[metric]
+                            
+                            # Determine trend direction
+                            if len(vals) >= 2 and vals[-1] is not None and vals[0] is not None and vals[0] != 0:
+                                change_pct = ((vals[-1] - vals[0]) / abs(vals[0])) * 100
+                                trend_arrow = "📈" if change_pct > 0 else "📉" if change_pct < 0 else "➡️"
+                            else:
+                                change_pct = 0
+                                trend_arrow = "➡️"
+                            
+                            fig_ts = go.Figure()
+                            fig_ts.add_trace(go.Scatter(
+                                x=year_labels, y=vals,
+                                mode='lines+markers+text',
+                                line=dict(width=3, color='#38bdf8'),
+                                marker=dict(size=8, color='#38bdf8'),
+                                text=[f"{v:.1f}" if v is not None else "" for v in vals],
+                                textposition="top center",
+                                textfont=dict(size=11),
+                                fill='tozeroy',
+                                fillcolor='rgba(56, 189, 248, 0.08)',
+                            ))
+                            
+                            fig_ts.update_layout(
+                                title=f"{trend_arrow} {metric}",
+                                height=280,
+                                margin=dict(l=10, r=10, t=40, b=10),
+                                paper_bgcolor='rgba(0,0,0,0)',
+                                plot_bgcolor='rgba(0,0,0,0)',
+                                yaxis=dict(showgrid=True, gridcolor='rgba(128,128,128,0.15)'),
+                                xaxis=dict(showgrid=False),
+                                showlegend=False,
+                            )
+                            st.plotly_chart(fig_ts, use_container_width=True)
+                            
+                            # Latest value + change
+                            if len(vals) >= 2:
+                                st.caption(f"Latest: **{vals[-1]:.2f}** — {change_pct:+.1f}% over {len(year_labels)} years")
+                            
+                            fc = formula_caption(metric)
+                            if fc:
+                                with st.expander("ℹ️", expanded=False):
+                                    st.caption(fc)
 
     # 2. DuPont Analysis (Redesigned)
     with tabs[1]:
