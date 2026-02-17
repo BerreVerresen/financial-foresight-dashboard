@@ -220,13 +220,13 @@ class BenchmarkingEngine:
                 "DSO (Days)": round(dso, 1),
                 "DPO (Days)": round(dpo, 1),
                 
-                # Liquidity
-                "Current Ratio": round(safe_div(get_latest_any(bs, ["Total Current Assets", "CurrentAssets"]), get_latest_any(bs, ["Total Current Liabilities", "CurrentLiabilities"])), 2),
+                # Liquidity (Yahoo Finance uses 'Current Assets' / 'Current Liabilities')
+                "Current Ratio": round(safe_div(get_latest_any(bs, ["Current Assets", "Total Current Assets"]), get_latest_any(bs, ["Current Liabilities", "Total Current Liabilities"])), 2),
                 "Quick Ratio": round(safe_div(
-                    (get_latest_any(bs, ["Total Current Assets", "CurrentAssets"]) - get_latest(bs, "Inventory")), 
-                    get_latest_any(bs, ["Total Current Liabilities", "CurrentLiabilities"])
+                    (get_latest_any(bs, ["Current Assets", "Total Current Assets"]) - get_latest(bs, "Inventory")), 
+                    get_latest_any(bs, ["Current Liabilities", "Total Current Liabilities"])
                 ), 2),
-                "Cash Ratio": round(safe_div(cash, get_latest_any(bs, ["Total Current Liabilities", "CurrentLiabilities"])), 2),
+                "Cash Ratio": round(safe_div(cash, get_latest_any(bs, ["Current Liabilities", "Total Current Liabilities"])), 2),
 
                 # Returns
                 "ROIC %": round(roic * 100, 1),
@@ -268,6 +268,10 @@ class BenchmarkingEngine:
                 # DuPont Drivers
                 "Asset Turnover": round(safe_div(rev, get_latest_any(bs, ["Total Assets", "TotalAssets"])), 2),
                 "Financial Leverage": round(safe_div(get_latest_any(bs, ["Total Assets", "TotalAssets"]), equity), 2),
+                "DuPont ROE": round(net_margin * safe_div(rev, get_latest_any(bs, ["Total Assets", "TotalAssets"])) * safe_div(get_latest_any(bs, ["Total Assets", "TotalAssets"]), equity) * 100, 1),
+                
+                # Efficiency (additional)
+                "Fixed Asset Turnover": round(safe_div(rev, get_latest_any(bs, ["Net PPE", "Property Plant And Equipment", "Gross PPE"])), 2),
                 
                 # Valuations
                 "EV/EBITDA": round(ev_ebitda, 1),
