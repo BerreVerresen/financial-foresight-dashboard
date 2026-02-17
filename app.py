@@ -131,6 +131,49 @@ def get_value_for_ticker(companies, ticker, key):
             
     return val if val is not None else 0
 
+def generate_analyst_note(focus_company, companies):
+    """Generates a rule-based executive summary."""
+    ticker = focus_company['ticker']
+    m = focus_company['metrics']
+    
+    notes = []
+    
+    # cohort stats
+    avg_rev_cagr = np.mean([c['metrics'].get('Revenue CAGR (3y)', 0) for c in companies])
+    avg_gross_margin = np.mean([c['metrics'].get('Gross Margin %', 0) for c in companies])
+    avg_roic = np.mean([c['metrics'].get('ROIC %', 0) for c in companies])
+    
+    # Growth
+    cagr = m.get('Revenue CAGR (3y)', 0)
+    if cagr > avg_rev_cagr + 5:
+        notes.append(f"**High Growth**: Revenue CAGR of {cagr}% significantly outperforms the cohort average ({avg_rev_cagr:.1f}%).")
+    elif cagr < avg_rev_cagr - 5:
+        notes.append(f"**Lagging Growth**: Revenue growth ({cagr}%) is below the cohort average.")
+
+    # Profitability
+    gm = m.get('Gross Margin %', 0)
+    if gm > avg_gross_margin + 5:
+        notes.append(f"**Strong Pricing Power**: Gross Margins ({gm}%) are superior to peers.")
+    
+    # Efficiency
+    roic = m.get('ROIC %', 0)
+    if roic > avg_roic + 2:
+        notes.append(f"**Capital Efficient**: ROIC of {roic}% indicates superior capital allocation.")
+    elif roic < avg_roic - 2:
+        notes.append(f"**Capital Inefficient**: ROIC ({roic}%) lags the cohort.")
+
+    # Leverage
+    lev = m.get('Net Debt / EBITDA', 0)
+    if lev > 3.0:
+        notes.append(f"**Highly Levered**: Net Debt/EBITDA is {lev}x, suggesting potential solvency risks.")
+    elif lev < 0:
+        notes.append(f"**Fortress Balance Sheet**: Company holds more cash than debt.")
+
+    if not notes:
+        return f"{ticker} performs in line with the cohort across major metrics."
+        
+    return " ".join(notes)
+
 # -------------------------------------------------------------------------
 # Sidebar
 # -------------------------------------------------------------------------
@@ -245,6 +288,10 @@ if 'data' in st.session_state:
         
         # Header
         st.title("AI Financial Foresight")
+        
+        # Analyst Note
+        note = generate_analyst_note(focus_company, companies)
+        st.info(f"🤖 **Analyst Insight**: {note}")
         
         # --- Tabs ---
     tabs = st.tabs(["🏆 Strategic Comparison", "💎 DuPont Analysis", "📊 Financial Statements", "🧪 Advanced Sandbox", "📑 Deep Dive"])
@@ -513,8 +560,58 @@ if 'data' in st.session_state:
 
     # 5. Deep Dive Table
     with tabs[4]:
+        st.subheader("📑 Deep Dive & Trends")
+        
+        # A. Sparklines (Trends)
+        st.markdown("### 📈 3-Year Trends")
+        
+        trend_data = []
+        for c in companies:
+            ticker = c['ticker']
+            raw = c.get('raw_data', {}).get('financials', {}).get('annual', {})
+            inc = raw.get('income_statement', {})
+            
+            def get_trend(data_dict, key):
+                if not data_dict or key not in data_dict: return [0,0,0]
+                series = data_dict[key]
+                # Sort by date ascending to show trend left-to-right
+                sorted_dates = sorted(series.keys())
+                # Take last 5 years max
+                vals = [series[d] for d in sorted_dates][-5:]
+                return vals
+            
+            # Try to find revenue key
+            rev_key = next((k for k in ["Total Revenue", "TotalRevenue", "Operating Revenue", "Revenue"] if k in inc), None)
+            ebitda_key = next((k for k in ["EBITDA", "Normalized EBITDA"] if k in inc), None)
+            ni_key = next((k for k in ["Net Income", "NetIncome"] if k in inc), None)
+            
+            trend_data.append({
+                "Ticker": ticker,
+                "Revenue Trend": get_trend(inc, rev_key),
+                "EBITDA Trend": get_trend(inc, ebitda_key),
+                "Net Income Trend": get_trend(inc, ni_key)
+            })
+            
+        df_trends = pd.DataFrame(trend_data)
+        
+        st.dataframe(
+            df_trends,
+            column_config={
+                "Revenue Trend": st.column_config.LineChartColumn("Revenue (5y)", y_min=0, width="medium"),
+                "EBITDA Trend": st.column_config.LineChartColumn("EBITDA (5y)", width="medium"),
+                "Net Income Trend": st.column_config.LineChartColumn("Net Income (5y)", width="medium")
+            },
+            use_container_width=True,
+            hide_index=True
+        )
+
+        # B. Full Metrics Table
+        st.markdown("### 📋 Detailed Metrics")
         full_df = pd.json_normalize([{'Ticker': c['ticker'], **c['metrics']} for c in companies]).set_index("Ticker")
         st.dataframe(full_df.style.background_gradient(cmap="viridis"), use_container_width=True)
+
+
+
 
 else:
     st.write("👈 Select tickers to begin.")
