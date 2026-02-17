@@ -51,28 +51,17 @@ st.markdown("""
 # Utilities
 # -------------------------------------------------------------------------
 
-# API Configuration
-API_URL = os.getenv("BACKEND_API_URL", "http://localhost:8000/api/benchmarks")
+# Import Local Engine
+from engines.benchmarking_engine import BenchmarkingEngine
 
 @st.cache_data(show_spinner=False)
 def get_data(ticker_list):
-    """Fetch benchmark data from the Backend API."""
+    """Fetch benchmark data using the local engine."""
+    engine = BenchmarkingEngine()
     try:
-        response = requests.get(
-            API_URL, 
-            params={"tickers": ",".join(ticker_list), "detailed": "true"},
-            timeout=60
-        )
-        if response.status_code == 200:
-            return response.json()
-        else:
-            st.error(f"API Error ({response.status_code}): {response.text}")
-            return {}
-    except requests.exceptions.ConnectionError:
-        st.error(f"Cannot connect to Backend API at {API_URL}. Is the server running?")
-        return {}
+        return engine.run_benchmark(ticker_list, detailed=True)
     except Exception as e:
-        st.error(f"Error fetching data: {e}")
+        st.error(f"Engine Error: {e}")
         return {}
 
 def get_financial_statement(company_data, stmt_type):
@@ -140,8 +129,8 @@ if st.sidebar.button("Run Analysis", type="primary"):
     st.session_state['run_requested'] = True
 
 st.sidebar.markdown("---")
-st.sidebar.caption("v3.0 - Frontend Only")
-st.sidebar.caption(f"Backend: `{API_URL}`")
+st.sidebar.caption("v3.1 - Self-Contained")
+
 
 # -------------------------------------------------------------------------
 # Main Logic
