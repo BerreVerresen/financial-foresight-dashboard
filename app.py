@@ -247,7 +247,7 @@ if 'data' in st.session_state:
         st.title("AI Financial Foresight")
         
         # --- Tabs ---
-    tabs = st.tabs(["🏆 Strategic Comparison", "📊 Financial Statements", "🧪 Advanced Sandbox", "📑 Deep Dive"])
+    tabs = st.tabs(["🏆 Strategic Comparison", "💎 DuPont Analysis", "📊 Financial Statements", "🧪 Advanced Sandbox", "📑 Deep Dive"])
     
     # 1. Strategic Comparison (Heatmap + Charts)
     with tabs[0]:
@@ -316,8 +316,71 @@ if 'data' in st.session_state:
                 )
                 st.plotly_chart(fig, use_container_width=True)
 
-    # 2. Financial Statements (Yahoo Style)
+    # 2. DuPont Analysis (NEW)
     with tabs[1]:
+        st.subheader(f"💎 DuPont Analysis: {focus_ticker}")
+        st.caption("Decomposing ROE into Profitability (Net Margin), Efficiency (Asset Turnover), and Leverage.")
+        
+        # A. Driver Tree (Focus Company)
+        m = focus_company['metrics']
+        
+        # Check if new metrics are available (might need to handle empty if not re-run yet)
+        net_margin = m.get('Net Margin %', 0)
+        asset_turnover = m.get('Asset Turnover', 0)
+        leverage = m.get('Financial Leverage', 1)
+        roe = m.get('ROE %', 0)
+        
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("ROE %", f"{roe}%", delta=None)
+        c2.metric("Net Margin %", f"{net_margin}%", help="Net Income / Revenue")
+        c3.metric("Asset Turnover", f"{asset_turnover}x", help="Revenue / Total Assets")
+        c4.metric("Fin. Leverage", f"{leverage}x", help="Assets / Equity")
+        
+        st.divider()
+        
+        # B. Strategic Positioning (Scatter)
+        st.markdown("### 🎯 Strategic Positioning (Margin vs Turnover)")
+        st.caption("Where do competitors play? High Margin (Luxury) vs High Velocity (Retail).")
+        
+        scatter_data = []
+        for c in companies:
+            scatter_data.append({
+                "Ticker": c['ticker'],
+                "Net Margin %": c['metrics'].get('Net Margin %', 0),
+                "Asset Turnover": c['metrics'].get('Asset Turnover', 0),
+                "ROE %": c['metrics'].get('ROE %', 0),
+                "Revenue ($B)": c['metrics'].get('Revenue ($B)', 0),
+            })
+        
+        df_scatter = pd.DataFrame(scatter_data)
+        
+        fig_dupont = px.scatter(
+            df_scatter,
+            x="Asset Turnover",
+            y="Net Margin %",
+            size="Revenue ($B)",
+            color="ROE %",
+            text="Ticker",
+            hover_data=["ROE %"],
+            title="DuPont Map: Efficiency vs Profitability",
+            color_continuous_scale="RdYlGn"
+        )
+        # Add efficient frontier lines?
+        # Iso-ROE curves: y * x * lev = ROE
+        # Simplify visual for now
+        
+        fig_dupont.update_traces(textposition='top center')
+        fig_dupont.update_layout(
+            height=600,
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            xaxis=dict(showgrid=True, gridcolor='#334155', title="Asset Turnover (Efficiency)"),
+            yaxis=dict(showgrid=True, gridcolor='#334155', title="Net Margin % (Profitability)")
+        )
+        st.plotly_chart(fig_dupont, use_container_width=True)
+
+    # 3. Financial Statements (Yahoo Style)
+    with tabs[2]:
         st.subheader(f"Financials: {focus_ticker}")
         stmt_type = st.radio("Statement Type", ["income_statement", "balance_sheet", "cash_flow"], horizontal=True, format_func=lambda x: x.replace("_", " ").title())
         
@@ -328,8 +391,8 @@ if 'data' in st.session_state:
         else:
             st.warning("No data available for this statement.")
 
-    # 3. Advanced Sandbox
-    with tabs[2]:
+    # 4. Advanced Sandbox
+    with tabs[3]:
         st.subheader("🧪 Formula Sandbox")
         st.info("Combine ANY metric or raw data point. Try 'Total Revenue' / 'Full Time Employees'.")
         
@@ -378,8 +441,8 @@ if 'data' in st.session_state:
                 fig = px.bar(df_res, x=df_res.index, y=new_name, color=df_res.index, title=new_name)
                 st.plotly_chart(fig, use_container_width=True)
 
-    # 4. Deep Dive Table
-    with tabs[3]:
+    # 5. Deep Dive Table
+    with tabs[4]:
         full_df = pd.json_normalize([{'Ticker': c['ticker'], **c['metrics']} for c in companies]).set_index("Ticker")
         st.dataframe(full_df.style.background_gradient(cmap="viridis"), use_container_width=True)
 

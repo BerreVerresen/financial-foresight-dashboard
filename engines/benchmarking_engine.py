@@ -228,7 +228,11 @@ class BenchmarkingEngine:
                 "R&D Intensity %": round(safe_div(rnd, rev) * 100, 1),
                 "Shareholder Yield %": round(shareholder_yield * 100, 1),
                 
-                # Valuation
+                # DuPont Drivers
+                "Asset Turnover": round(safe_div(rev, get_latest(bs, "Total Assets")), 2),
+                "Financial Leverage": round(safe_div(get_latest(bs, "Total Assets"), equity), 2),
+                
+                # Valuations
                 "EV/EBITDA": round(ev_ebitda, 1),
                 "P/E Ratio": round(pe_ratio if pe_ratio else 0.0, 1)
             }
