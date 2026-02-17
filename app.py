@@ -462,8 +462,8 @@ if 'data' in st.session_state:
                     ))
                     
                     fig.update_layout(
-                        height=200,
-                        margin=dict(l=20, r=20, t=50, b=10),
+                        height=260,
+                        margin=dict(l=20, r=20, t=70, b=15),
                         paper_bgcolor='rgba(0,0,0,0)',
                     )
                     st.plotly_chart(fig, use_container_width=True)
