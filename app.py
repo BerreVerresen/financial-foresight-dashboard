@@ -254,7 +254,9 @@ if st.sidebar.button("Run Analysis", type="primary"):
     st.session_state['run_requested'] = True
 
 st.sidebar.markdown("---")
-st.sidebar.caption("v3.2 - AI Enhanced")
+if st.sidebar.button("🔄 Clear Cache & Reload"):
+    st.cache_data.clear()
+st.sidebar.caption("v3.3 - Sandbox Fixed")
 
 
 # -------------------------------------------------------------------------
@@ -396,93 +398,7 @@ if 'data' in st.session_state:
         mc4.metric("Asset Turnover", f"{asset_turnover:.2f}x", delta=f"{asset_turnover - avg_at:+.2f}x vs avg", delta_color="normal", help="Efficiency: Revenue / Total Assets")
         mc5.metric("Fin. Leverage", f"{leverage:.2f}x", delta=f"{leverage - avg_lev:+.2f}x vs avg", delta_color="inverse", help="Leverage: Total Assets / Equity (lower = safer)")
         
-        st.divider()
         
-        # --- B. Sankey Decomposition Tree ---
-        st.markdown("### 🌊 ROE Flow Decomposition")
-        st.caption(f"How {focus_ticker}'s ROE is constructed from its three drivers.")
-        
-        # Normalize components for visual weight (absolute values for Sankey)
-        abs_nm = abs(net_margin) if net_margin else 0.01
-        abs_at = abs(asset_turnover) if asset_turnover else 0.01
-        abs_lev = abs(leverage) if leverage else 0.01
-        total_weight = abs_nm + abs_at + abs_lev
-        
-        fig_sankey = go.Figure(data=[go.Sankey(
-            node = dict(
-                pad = 20,
-                thickness = 30,
-                line = dict(color = "rgba(255,255,255,0.3)", width = 1),
-                label = [
-                    f"Net Margin: {net_margin:.1f}%",
-                    f"Asset Turnover: {asset_turnover:.2f}x", 
-                    f"Fin. Leverage: {leverage:.2f}x",
-                    f"ROE: {roe:.1f}%"
-                ],
-                color = ["#22d3ee", "#a78bfa", "#fb923c", "#4ade80" if roe > 0 else "#f87171"],
-                x = [0.01, 0.01, 0.01, 0.99],
-                y = [0.1, 0.5, 0.9, 0.5]
-            ),
-            link = dict(
-                source = [0, 1, 2],
-                target = [3, 3, 3],
-                value = [abs_nm / total_weight * 100, abs_at / total_weight * 100, abs_lev / total_weight * 100],
-                color = ["rgba(34, 211, 238, 0.3)", "rgba(167, 139, 250, 0.3)", "rgba(251, 146, 60, 0.3)"]
-            )
-        )])
-        
-        fig_sankey.update_layout(
-            title_text="",
-            font_size=14,
-            height=350,
-            margin=dict(l=20, r=20, t=10, b=10),
-            paper_bgcolor='rgba(0,0,0,0)',
-        )
-        st.plotly_chart(fig_sankey, use_container_width=True)
-        
-        st.divider()
-        
-        # --- C. Cohort Spider/Radar Chart ---
-        st.markdown("### 🕸️ Cohort DuPont Comparison")
-        st.caption("How does each company's DuPont profile compare?")
-        
-        fig_radar = go.Figure()
-        
-        categories = ['Net Margin %', 'Asset Turnover', 'Financial Leverage', 'ROE %', 'DuPont ROE']
-        
-        for c_data in companies:
-            cm = c_data['metrics']
-            values = [
-                cm.get('Net Margin %', 0),
-                cm.get('Asset Turnover', 0) * 10,  # Scale up for visibility
-                cm.get('Financial Leverage', 0),
-                cm.get('ROE %', 0),
-                cm.get('DuPont ROE', 0)
-            ]
-            values.append(values[0])  # Close the polygon
-            
-            fig_radar.add_trace(go.Scatterpolar(
-                r=values,
-                theta=categories + [categories[0]],
-                fill='toself',
-                name=c_data['ticker'],
-                opacity=0.7 if c_data['ticker'] != focus_ticker else 1.0,
-                line=dict(width=3 if c_data['ticker'] == focus_ticker else 1)
-            ))
-        
-        fig_radar.update_layout(
-            polar=dict(
-                radialaxis=dict(visible=True, showticklabels=True, gridcolor='#334155'),
-                angularaxis=dict(gridcolor='#334155')
-            ),
-            showlegend=True,
-            height=500,
-            paper_bgcolor='rgba(0,0,0,0)',
-            font=dict(size=13)
-        )
-        st.plotly_chart(fig_radar, use_container_width=True)
-        
-        st.divider()
 
         # --- D. Strategic Positioning Scatter (Enhanced) ---
         st.markdown("### 🎯 Strategic Positioning Map")
@@ -566,113 +482,77 @@ if 'data' in st.session_state:
         
         # --- A. Template Gallery ---
         st.markdown("### 📋 Quick Templates")
-        st.caption("Click a template to auto-fill the formula, or build your own below.")
+        st.caption("Select a template to auto-fill the formula, or build your own below.")
         
-        templates = {
+        template_options = {
+            "(none)": {"formula": "", "name": "My Custom KPI"},
             "EBITDA per Employee": {"formula": "'EBITDA' / 'fullTimeEmployees'", "name": "EBITDA / Employee"},
             "Revenue per Employee": {"formula": "'Total Revenue' / 'fullTimeEmployees'", "name": "Revenue / Employee"},
             "R&D Efficiency": {"formula": "'Total Revenue' / 'Research And Development'", "name": "R&D Efficiency (Rev/R&D)"},
-            "Capex / OCF": {"formula": "abs('Capital Expenditure') / 'Operating Cash Flow' * 100", "name": "Capex / OCF %"},
-            "Net Income / OCF": {"formula": "'Net Income' / 'Operating Cash Flow'", "name": "Earnings Quality"},
-            "Working Capital Ratio": {"formula": "('Current Assets' - 'Current Liabilities') / 'Total Revenue' * 100", "name": "Working Capital / Revenue %"},
+            "Capex / OCF %": {"formula": "abs('Capital Expenditure') / 'Operating Cash Flow' * 100", "name": "Capex / OCF %"},
+            "Earnings Quality": {"formula": "'Net Income' / 'Operating Cash Flow'", "name": "Earnings Quality"},
+            "Working Capital / Rev %": {"formula": "('Current Assets' - 'Current Liabilities') / 'Total Revenue' * 100", "name": "Working Capital / Revenue %"},
         }
         
-        # Initialize session state for formula
-        if 'sandbox_formula' not in st.session_state:
-            st.session_state['sandbox_formula'] = ""
-        if 'sandbox_name' not in st.session_state:
-            st.session_state['sandbox_name'] = "My Custom KPI"
+        selected_template = st.selectbox("Choose template", list(template_options.keys()), key="sandbox_template")
         
-        # Template buttons in a grid
-        t_cols = st.columns(3)
-        for idx, (tpl_label, tpl_data) in enumerate(templates.items()):
-            with t_cols[idx % 3]:
-                if st.button(f"📌 {tpl_label}", key=f"tpl_{idx}", use_container_width=True):
-                    st.session_state['sandbox_formula'] = tpl_data['formula']
-                    st.session_state['sandbox_name'] = tpl_data['name']
-                    st.rerun()
+        # Set defaults from template
+        tpl = template_options[selected_template]
+        default_formula = tpl["formula"]
+        default_name = tpl["name"]
         
         st.divider()
         
-        # --- B. Variable Browser (Categorized) ---
+        # --- B. Variable Browser (Dropdown-based) ---
         st.markdown("### 🔍 Variable Browser")
-        st.caption("Click a variable to insert it into your formula.")
+        st.caption("Select a variable to see its formatted name — copy and paste it into the formula.")
         
-        var_tabs = st.tabs(["📈 Computed Metrics", "📊 Income Statement", "🏦 Balance Sheet", "💰 Cash Flow"])
+        var_category = st.selectbox("Category", ["Computed Metrics", "Income Statement", "Balance Sheet", "Cash Flow"], key="var_cat")
         
-        with var_tabs[0]:
-            v_cols = st.columns(4)
-            for i, var in enumerate(sorted(sample_metrics)):
-                with v_cols[i % 4]:
-                    if st.button(var, key=f"var_m_{i}", use_container_width=True):
-                        current = st.session_state.get('sandbox_formula', '')
-                        st.session_state['sandbox_formula'] = current + f"'{var}'"
-                        st.rerun()
+        if var_category == "Computed Metrics":
+            var_list = sorted(sample_metrics)
+        elif var_category == "Income Statement":
+            var_list = raw_keys_inc
+        elif var_category == "Balance Sheet":
+            var_list = raw_keys_bs
+        else:
+            var_list = raw_keys_cf
         
-        with var_tabs[1]:
-            v_cols = st.columns(4)
-            for i, var in enumerate(raw_keys_inc):
-                with v_cols[i % 4]:
-                    if st.button(var, key=f"var_i_{i}", use_container_width=True):
-                        current = st.session_state.get('sandbox_formula', '')
-                        st.session_state['sandbox_formula'] = current + f"'{var}'"
-                        st.rerun()
-        
-        with var_tabs[2]:
-            v_cols = st.columns(4)
-            for i, var in enumerate(raw_keys_bs):
-                with v_cols[i % 4]:
-                    if st.button(var, key=f"var_b_{i}", use_container_width=True):
-                        current = st.session_state.get('sandbox_formula', '')
-                        st.session_state['sandbox_formula'] = current + f"'{var}'"
-                        st.rerun()
-        
-        with var_tabs[3]:
-            v_cols = st.columns(4)
-            for i, var in enumerate(raw_keys_cf):
-                with v_cols[i % 4]:
-                    if st.button(var, key=f"var_c_{i}", use_container_width=True):
-                        current = st.session_state.get('sandbox_formula', '')
-                        st.session_state['sandbox_formula'] = current + f"'{var}'"
-                        st.rerun()
+        if var_list:
+            selected_var = st.selectbox("Select variable", ["(browse)"] + var_list, key="var_select")
+            if selected_var != "(browse)":
+                st.code(f"'{selected_var}'", language="python")
+                st.caption("👆 Copy the text above and paste it into the formula field below.")
+                
+                # Show current values across companies
+                var_preview = []
+                for c_item in companies:
+                    val = get_value_for_ticker(companies, c_item['ticker'], selected_var)
+                    var_preview.append({"Ticker": c_item['ticker'], "Value": val if val is not None else 0})
+                st.dataframe(pd.DataFrame(var_preview).set_index("Ticker"), use_container_width=True, height=150)
+        else:
+            st.info("No variables available in this category.")
         
         st.divider()
         
         # --- C. Formula Builder ---
         st.markdown("### ⚡ Formula Builder")
+        st.caption("Use single quotes around variable names. Operators: `+` `-` `*` `/` `abs()` `round()`")
         
         f_c1, f_c2 = st.columns([3, 1])
         with f_c1:
             formula = st.text_input(
                 "Formula", 
-                value=st.session_state.get('sandbox_formula', ''),
+                value=default_formula,
                 placeholder="e.g. ('Total Revenue' - 'Cost Of Revenue') / 'fullTimeEmployees'",
-                help="Use single quotes around variable names. Operators: + - * / abs() round()",
                 key="formula_input"
             )
-            # Sync back
-            st.session_state['sandbox_formula'] = formula
         with f_c2:
             metric_name = st.text_input(
                 "Metric Name", 
-                value=st.session_state.get('sandbox_name', 'My Custom KPI'),
+                value=default_name,
                 key="metric_name_input"
             )
-            st.session_state['sandbox_name'] = metric_name
-        
-        # Operator buttons
-        op_cols = st.columns(8)
-        ops = ["+", "-", "*", "/", "(", ")", "abs(", "100"]
-        for i, op in enumerate(ops):
-            with op_cols[i]:
-                if st.button(op, key=f"op_{i}", use_container_width=True):
-                    st.session_state['sandbox_formula'] = st.session_state.get('sandbox_formula', '') + f" {op} "
-                    st.rerun()
-        
-        if st.button("🗑️ Clear Formula", key="clear_formula"):
-            st.session_state['sandbox_formula'] = ""
-            st.session_state['sandbox_name'] = "My Custom KPI"
-            st.rerun()
         
         st.divider()
 
@@ -688,9 +568,8 @@ if 'data' in st.session_state:
                 st.error("Enter a formula first.")
             else:
                 results = []
-                input_var_data = {}  # For individual metric visualization
+                input_var_data = {}
                 
-                # Parse variables from formula
                 needed_vars = re.findall(r"'(.*?)'", formula)
                 
                 for c_item in companies:
@@ -700,7 +579,6 @@ if 'data' in st.session_state:
                         val = get_value_for_ticker(companies, c_item['ticker'], v_name)
                         safe_eval_dict[v_name] = val if val is not None else 0
                         
-                        # Collect for input visualization
                         if v_name not in input_var_data:
                             input_var_data[v_name] = []
                         input_var_data[v_name].append({"Ticker": c_item['ticker'], "Value": val if val is not None else 0})
@@ -751,13 +629,14 @@ if 'data' in st.session_state:
                     st.plotly_chart(fig, use_container_width=True)
                 
                 # --- E. Input Variable Breakdown ---
-                if needed_vars:
+                if len(needed_vars) > 0:
                     st.markdown("### 🔬 Input Variable Breakdown")
                     st.caption("Individual values for each variable used in your formula.")
                     
-                    var_viz_cols = st.columns(min(len(needed_vars), 3))
+                    n_cols = min(len(needed_vars), 3)
+                    var_viz_cols = st.columns(n_cols)
                     for v_idx, v_name in enumerate(needed_vars):
-                        with var_viz_cols[v_idx % min(len(needed_vars), 3)]:
+                        with var_viz_cols[v_idx % n_cols]:
                             v_df = pd.DataFrame(input_var_data[v_name])
                             fig_v = px.bar(
                                 v_df, x="Ticker", y="Value", title=v_name,
@@ -777,36 +656,18 @@ if 'data' in st.session_state:
                 
                 # --- F. Save to Strategic Comparison ---
                 if save_to_comparison:
-                    # Store custom KPI in session state
                     if 'custom_kpis' not in st.session_state:
                         st.session_state['custom_kpis'] = {}
                     
-                    # Save the computed values for each company
                     for r in results:
                         ticker = r['Ticker']
-                        # Find the company in session data and add the metric
-                        for comp in st.session_state['data']['companies']:
+                        for comp in st.session_state.get('data', {}).get('companies', []):
                             if comp['ticker'] == ticker:
                                 comp['metrics'][metric_name] = r[metric_name]
                     
                     st.session_state['custom_kpis'][metric_name] = formula
-                    st.success(f"✅ **{metric_name}** saved! It now appears in the Strategic Comparison tab under all focus modes.")
+                    st.success(f"✅ **{metric_name}** saved! It now appears in the Strategic Comparison tab.")
                     st.balloons()
-        
-        # --- G. Saved Custom KPIs ---
-        if st.session_state.get('custom_kpis'):
-            st.divider()
-            st.markdown("### 💾 Saved Custom KPIs")
-            for kpi_name, kpi_formula in st.session_state['custom_kpis'].items():
-                with st.expander(f"📌 {kpi_name}", expanded=False):
-                    st.code(kpi_formula, language="python")
-                    if st.button(f"🗑️ Remove '{kpi_name}'", key=f"del_{kpi_name}"):
-                        del st.session_state['custom_kpis'][kpi_name]
-                        # Also remove from company metrics
-                        for comp in st.session_state['data']['companies']:
-                            if kpi_name in comp['metrics']:
-                                del comp['metrics'][kpi_name]
-                        st.rerun()
 
     # 5. Deep Dive (Expert Suite)
     with tabs[4]:
