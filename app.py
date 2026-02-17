@@ -313,7 +313,7 @@ if 'data' in st.session_state:
         metrics_to_show = metric_groups.get(focus_mode, metric_groups["Overview"])
         
         # A. Heatmap Matrix
-        with st.expander(f"Heatmap View ({focus_mode})", expanded=True):
+        with st.expander(f"Heatmap View ({focus_mode})", expanded=False):
             matrix = []
             for c in companies:
                 row = {"Ticker": c['ticker']}
