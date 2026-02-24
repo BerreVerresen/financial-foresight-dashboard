@@ -1007,6 +1007,23 @@ if 'data' in st.session_state:
         if saved_kpis:
             st.divider()
             st.markdown("### 💾 Saved Custom KPIs")
+            remove_selection = st.multiselect(
+                "Select KPIs to remove",
+                options=list(saved_kpis.keys()),
+                default=[],
+                key="remove_saved_kpis"
+            )
+            if remove_selection and st.button("Remove selected KPIs", key="remove_saved_kpis_button"):
+                for kpi_name in remove_selection:
+                    st.session_state['saved_sandbox_kpis'].pop(kpi_name, None)
+                for comp in companies:
+                    metrics = comp.get('metrics')
+                    if isinstance(metrics, dict):
+                        for kpi_name in remove_selection:
+                            metrics.pop(kpi_name, None)
+                st.session_state["remove_saved_kpis"] = []
+                st.success(f"Removed: {', '.join(remove_selection)}")
+                saved_kpis = st.session_state.get('saved_sandbox_kpis', {})
             for kpi_name, kpi_formula in saved_kpis.items():
                 st.markdown(f"**{kpi_name}**: `{kpi_formula}`")
 
