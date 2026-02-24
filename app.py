@@ -7,6 +7,7 @@ import os
 import json
 import requests
 import numpy as np
+import re
 
 # Page Config
 st.set_page_config(
@@ -513,21 +514,47 @@ if 'data' in st.session_state:
                 if a is None or b is None or b == 0: return None
                 return a / b
             
-            # Get all available years from income statement
+            # Get all available years from income statement, filtering for valid dates
             rev_key = next((k for k in ["Total Revenue", "TotalRevenue", "Operating Revenue", "Revenue"] if k in inc), None)
+            
+            all_years = []
             if rev_key and inc[rev_key]:
-                all_years = sorted(inc[rev_key].keys())[-5:]
-            else:
-                all_years = []
-                st.warning("No annual revenue data available for time series.")
+                # robust Sort only valid YYYY-MM-DD keys
+                valid_years = [y for y in inc[rev_key].keys() if re.match(r'^\d{4}-\d{2}-\d{2}', str(y))]
+                all_years = sorted(valid_years)[-5:]
+            
+            if not all_years:
+                year_candidates = set()
+                for stmt in (inc, bs, cf):
+                    for series in stmt.values():
+                        if isinstance(series, dict):
+                            for y in series.keys():
+                                if re.match(r'^\d{4}-\d{2}-\d{2}', str(y)):
+                                    year_candidates.add(y)
+                all_years = sorted(year_candidates)[-5:]
+            
+            if not all_years:
+                st.warning("No annual statement data available for time series.")
             
             if all_years:
                 def get_val(stmt, keys, year):
-                    """Get a value for a specific year from a statement, trying multiple key names."""
+                    """Get a value for a specific year from a statement, trying multiple key names and fuzzy matching."""
                     if isinstance(keys, str): keys = [keys]
+                    
+                    # 1. Try exact match
                     for k in keys:
                         if k in stmt and stmt[k] and year in stmt[k]:
                             return stmt[k][year]
+                    
+                    # 2. Try fuzzy match (case/space insensitive)
+                    stmt_norm = {k.lower().replace(" ", ""): k for k in stmt.keys()}
+                    for k in keys:
+                        k_norm = k.lower().replace(" ", "")
+                        if k_norm in stmt_norm:
+                            real_k = stmt_norm[k_norm]
+                            if real_k in stmt and stmt[real_k] and year in stmt[real_k]:
+                                return stmt[real_k][year]
+                                
                     return None
                 
                 # Compute KPIs per year
@@ -566,12 +593,77 @@ if 'data' in st.session_state:
                     "DPO (Days)": lambda y: (safe_div_ts(get_val(bs, ["Accounts Payable", "Payables"], y), get_val(inc, "Cost Of Revenue", y)) or 0) * 365,
                 }
                 
+                saved_kpis = st.session_state.get('saved_sandbox_kpis', {})
+                series_cache = {}
+                
+                def get_statement_value(year, var_name):
+                    """Try to fetch a raw statement line item for a given year."""
+                    for stmt in (inc, bs, cf):
+                        val = get_val(stmt, var_name, year)
+                        if val is not None:
+                            return val
+                    return None
+                
+                def compile_formula(formula):
+                    raw_vars = re.findall(r"'(.*?)'", formula)
+                    needed_vars = []
+                    for v_name in raw_vars:
+                        if v_name not in needed_vars:
+                            needed_vars.append(v_name)
+                    eval_formula = formula
+                    placeholders = {}
+                    for idx, v_name in enumerate(needed_vars):
+                        placeholder = f"__v{idx}__"
+                        eval_formula = eval_formula.replace(f"'{v_name}'", placeholder)
+                        placeholders[v_name] = placeholder
+                    return eval_formula, placeholders, needed_vars
+                
+                def compute_formula_series(formula, stack):
+                    eval_formula, placeholders, needed_vars = compile_formula(formula)
+                    series_by_var = {v_name: get_series_for_key(v_name, stack) for v_name in needed_vars}
+                    values = []
+                    for idx, _ in enumerate(all_years):
+                        eval_context = {"abs": abs, "round": round, "min": min, "max": max}
+                        for v_name, placeholder in placeholders.items():
+                            eval_context[placeholder] = series_by_var[v_name][idx]
+                        try:
+                            result = eval(eval_formula, {"__builtins__": None}, eval_context)
+                            values.append(round(float(result), 2) if result is not None else 0)
+                        except Exception:
+                            values.append(0)
+                    return values
+                
+                def get_series_for_key(key_name, stack=None):
+                    if key_name in series_cache:
+                        return series_cache[key_name]
+                    
+                    if stack is None:
+                        stack = set()
+                    if key_name in stack:
+                        series_cache[key_name] = [0] * len(all_years)
+                        return series_cache[key_name]
+                    
+                    stack.add(key_name)
+                    try:
+                        if key_name in saved_kpis:
+                            values = compute_formula_series(saved_kpis[key_name], stack)
+                        elif key_name in metric_computations:
+                            values = [metric_computations[key_name](y) for y in all_years]
+                        else:
+                            values = []
+                            for y in all_years:
+                                val = get_statement_value(y, key_name)
+                                values.append(val if val is not None else 0)
+                        series_cache[key_name] = values
+                        return values
+                    finally:
+                        stack.remove(key_name)
+                
                 # Only compute for metrics currently shown
                 for metric in metrics_to_show:
-                    if metric in metric_computations:
+                    if metric in metric_computations or metric in saved_kpis:
                         try:
-                            vals = [metric_computations[metric](y) for y in all_years]
-                            kpi_time_series[metric] = vals
+                            kpi_time_series[metric] = get_series_for_key(metric)
                         except: pass
                 
                 # Year labels
@@ -588,12 +680,13 @@ if 'data' in st.session_state:
                             vals = kpi_time_series[metric]
                             
                             # Determine trend direction
-                            if len(vals) >= 2 and vals[-1] is not None and vals[0] is not None and vals[0] != 0:
-                                change_pct = ((vals[-1] - vals[0]) / abs(vals[0])) * 100
-                                trend_arrow = "📈" if change_pct > 0 else "📉" if change_pct < 0 else "➡️"
-                            else:
-                                change_pct = 0
-                                trend_arrow = "➡️"
+                            change_pct = 0
+                            trend_arrow = "➡️"
+                            
+                            if len(vals) >= 2 and vals[-1] is not None and vals[0] is not None:
+                                if abs(vals[0]) > 0.001:
+                                    change_pct = ((vals[-1] - vals[0]) / abs(vals[0])) * 100
+                                    trend_arrow = "📈" if change_pct > 0 else "📉" if change_pct < 0 else "➡️"
                             
                             fig_ts = go.Figure()
                             fig_ts.add_trace(go.Scatter(
@@ -620,9 +713,9 @@ if 'data' in st.session_state:
                             )
                             st.plotly_chart(fig_ts, use_container_width=True)
                             
-                            # Latest value + change
-                            if len(vals) >= 2:
-                                st.caption(f"Latest: **{vals[-1]:.2f}** — {change_pct:+.1f}% over {len(year_labels)} years")
+                            # Latest value
+                            if len(vals) >= 1:
+                                st.caption(f"Latest: **{vals[-1]:.2f}**")
                             
                             fc = formula_caption(metric)
                             if fc:
@@ -951,8 +1044,17 @@ if 'data' in st.session_state:
         st.divider()
         
         # B. Governance & Risk Scorecard (Enhanced)
-        st.markdown("### 🏛️ Governance & Risk Scorecard")
-        st.caption("Risk scores range from **1 (low risk)** to **10 (high risk)**. Scores are sourced from Yahoo Finance's ISS governance analytics. Lower is better.")
+        st.subheader("⚖️ Governance & Risk Profile")
+        st.caption("Assessing board, audit, and compensation risks. Scores supplied by Institutional Shareholder Services (ISS).")
+        
+        with st.expander("ℹ️ Methodology & Sources"):
+            st.markdown("""
+            **Governance QualityScores** are provided by **Institutional Shareholder Services (ISS)**.
+            *   **Scale**: 1 to 10.
+            *   **1** = Low Risk (Best) 🟢
+            *   **10** = High Risk (Worst) 🔴
+            *   **Data Source**: Yahoo Finance / ISS Governance.
+            """)
         
         m = focus_company['metrics']
         
