@@ -59,17 +59,28 @@ st.markdown("""
 # Import Local Engine
 from engines.benchmarking_engine import BenchmarkingEngine
 from engines.competitor_discovery import CompetitorDiscoveryEngine
+from engines.currency import (
+    convert_value, get_rate, currency_symbol, money_suffix, normalize_currency,
+    metric_is_absolute, metric_currency_field, make_signature, clear_fx_cache,
+    COMMON_CURRENCIES, DEFAULT_PROVIDER_ORDER,
+)
 from dotenv import load_dotenv
 
 # Load Environment Variables
 load_dotenv()
 
 @st.cache_data(show_spinner=False)
-def get_data(ticker_list):
-    """Fetch benchmark data using the local engine."""
+def get_data(ticker_list, fx_signature):
+    """Fetch benchmark data using the local engine.
+
+    ``fx_signature`` (provider order + manual overrides) is part of the cache key
+    because it drives the intra-company (ADR) currency correction baked into the
+    data. The *display* currency is applied at render time, so switching currency
+    does NOT re-fetch.
+    """
     engine = BenchmarkingEngine()
     try:
-        return engine.run_benchmark(ticker_list, detailed=True)
+        return engine.run_benchmark(ticker_list, detailed=True, fx_signature=fx_signature)
     except Exception as e:
         st.error(f"Engine Error: {e}")
         return {}
@@ -257,7 +268,432 @@ if st.sidebar.button("Run Analysis", type="primary"):
 st.sidebar.markdown("---")
 if st.sidebar.button("🔄 Clear Cache & Reload"):
     st.cache_data.clear()
-st.sidebar.caption("v3.3 - Sandbox Fixed")
+st.sidebar.caption("v3.4 - Multi-currency")
+
+
+# -------------------------------------------------------------------------
+# Currency & FX configuration (sidebar)
+# -------------------------------------------------------------------------
+with st.sidebar.expander("💱 Currency & FX", expanded=False):
+    # Option list = common currencies + any currency present in the loaded
+    # cohort + an "Other" escape hatch for ANY ISO 4217 code. The FX providers
+    # resolve arbitrary pairs (Yahoo any pair + USD triangulation; open.er-api
+    # 160+ codes), so the target is not limited to this list.
+    _cohort_ccys = []
+    _loaded = st.session_state.get("data")
+    if isinstance(_loaded, dict):
+        _cinfo = _loaded.get("currency", {}) or {}
+        _cohort_ccys = list((_cinfo.get("distinct_currencies", {}) or {}).keys())
+    _base = list(COMMON_CURRENCIES)
+    for _c in _cohort_ccys:
+        if _c and _c not in _base:
+            _base.append(_c)
+    _ccy_options = ["NATIVE"] + _base + ["OTHER"]
+
+    def _ccy_label(c):
+        if c == "NATIVE":
+            return "Native (no conversion)"
+        if c == "OTHER":
+            return "✏️ Other (type any code)…"
+        return c
+
+    _choice = st.selectbox(
+        "Display currency",
+        options=_ccy_options,
+        index=_ccy_options.index("EUR"),
+        format_func=_ccy_label,
+        help="Convert all absolute figures to this currency (ratios/percentages are currency-neutral and never converted). Pick 'Other' to enter ANY ISO 4217 code — e.g. PHP, IDR, CLP.",
+        key="display_currency_choice",
+    )
+    if _choice == "OTHER":
+        _custom = st.text_input(
+            "ISO currency code", value=st.session_state.get("display_currency_custom", ""),
+            max_chars=3, placeholder="e.g. PHP",
+        ).strip().upper()
+        st.session_state["display_currency_custom"] = _custom
+        target_currency = _custom if _custom else "NATIVE"
+        if _custom:
+            st.caption(f"Converting to **{_custom}** (symbol: {currency_symbol(_custom)}). Falls back to native if no FX rate is found.")
+    else:
+        target_currency = _choice
+
+    _provider_labels = {
+        "yahoo": "Yahoo Finance",
+        "frankfurter": "Frankfurter (ECB)",
+        "open.er-api": "open.er-api",
+        "manual": "Manual override",
+    }
+    provider_order = st.multiselect(
+        "FX source priority (in order)",
+        options=list(_provider_labels.keys()),
+        default=list(DEFAULT_PROVIDER_ORDER),
+        format_func=lambda k: _provider_labels[k],
+        help="Tried top-to-bottom until one returns a rate. Yahoo reuses your existing data source; the rest are free, no-key fallbacks.",
+        key="fx_provider_order",
+    )
+    if not provider_order:
+        provider_order = list(DEFAULT_PROVIDER_ORDER)
+
+    st.caption("Manual rate override (optional)")
+    _mo1, _mo2, _mo3 = st.columns(3)
+    with _mo1:
+        _ov_from = st.text_input("From", key="ov_from", placeholder="USD")
+    with _mo2:
+        _ov_to = st.text_input("To", key="ov_to", placeholder="EUR")
+    with _mo3:
+        _ov_rate = st.number_input("Rate", min_value=0.0, value=0.0, step=0.01, format="%.4f", key="ov_rate")
+    manual_priority = st.checkbox(
+        "Pin manual rates as top priority", value=False,
+        help="On = your override beats live sources. Off = it's the final fallback.",
+        key="fx_manual_priority",
+    )
+    if st.button("Add / update override"):
+        if _ov_from and _ov_to and _ov_rate > 0:
+            _ovs = dict(st.session_state.get("fx_overrides", {}))
+            _ovs[f"{_ov_from.strip().upper()}{_ov_to.strip().upper()}"] = float(_ov_rate)
+            st.session_state["fx_overrides"] = _ovs
+            st.success(f"Saved {_ov_from.strip().upper()}→{_ov_to.strip().upper()} = {float(_ov_rate):.4f}")
+
+    fx_overrides = dict(st.session_state.get("fx_overrides", {}))
+    if fx_overrides:
+        st.caption("Active overrides:")
+        for _k, _v in list(fx_overrides.items()):
+            _oc1, _oc2 = st.columns([3, 1])
+            _oc1.markdown(f"`{_k[:3]}→{_k[3:]}` = **{_v:.4f}**")
+            if _oc2.button("✕", key=f"rm_ov_{_k}"):
+                fx_overrides.pop(_k, None)
+                st.session_state["fx_overrides"] = fx_overrides
+                st.rerun()
+
+    if st.button("🔄 Refresh FX rates"):
+        clear_fx_cache()
+        # Also invalidate the benchmark cache so the engine's ADR correction
+        # (EV/EBITDA, Shareholder Yield) is recomputed with fresh rates too.
+        try:
+            get_data.clear()
+        except Exception:
+            st.cache_data.clear()
+        st.rerun()
+
+# Resolve the active FX configuration for this run.
+# (target_currency was set inside the Currency & FX expander above.)
+try:
+    target_currency
+except NameError:
+    target_currency = "EUR"
+st.session_state["display_currency"] = target_currency
+fx_overrides = dict(st.session_state.get("fx_overrides", {}))
+fx_signature = make_signature(provider_order, fx_overrides, {}, manual_priority)
+
+
+# -------------------------------------------------------------------------
+# Currency display helpers (depend on the active target_currency / fx_signature)
+# -------------------------------------------------------------------------
+def company_currency(company, field="financial"):
+    cur = company.get("currencies", {}) or {}
+    return cur.get("financial") if field == "financial" else cur.get("trading")
+
+
+def convert_to_display(value, from_ccy):
+    """Convert a native value to the display currency.
+
+    Returns (value, shown_currency). Falls back to the native value + native
+    currency when conversion is unavailable or disabled (Native mode)."""
+    if value is None:
+        return None, from_ccy
+    if target_currency == "NATIVE" or not from_ccy:
+        return value, from_ccy
+    conv, rate = convert_value(value, from_ccy, target_currency, fx_signature)
+    if conv is None:
+        return value, from_ccy
+    return conv, target_currency
+
+
+def display_factor(from_ccy):
+    """Multiplicative factor to convert a native amount to the display currency."""
+    if target_currency == "NATIVE" or not from_ccy:
+        return 1.0, from_ccy
+    r = get_rate(from_ccy, target_currency, fx_signature)
+    if not r:
+        return 1.0, from_ccy
+    return r["rate"], target_currency
+
+
+def metric_value(company, metric):
+    """Metric value for display — converted iff it's an absolute money metric."""
+    val = company.get("metrics", {}).get(metric, 0)
+    if not metric_is_absolute(metric):
+        return val
+    from_ccy = company_currency(company, metric_currency_field(metric))
+    conv, _ = convert_to_display(val, from_ccy)
+    return conv if conv is not None else val
+
+
+def metric_label(metric):
+    """Chart/card title — swaps '($B)' for the display-currency suffix on absolutes."""
+    if metric_is_absolute(metric) and target_currency != "NATIVE":
+        base = metric.replace(" ($B)", "")
+        return f"{base} {money_suffix(target_currency)}"
+    return metric
+
+
+def currency_note():
+    """Short caption clarifying which figures are converted on a given chart."""
+    if target_currency == "NATIVE":
+        return "Absolutes in each company's native currency (not cross-comparable)."
+    return f"Absolute figures in {target_currency} (FX-normalized); ratios are currency-neutral."
+
+
+def compute_display_degraded(data):
+    """Tickers whose native currency cannot be converted to the display currency.
+
+    Their absolute figures fall back to native, so they must not be silently
+    averaged/plotted alongside converted peers. Uses the cached get_rate, so it's
+    consistent with what the charts will resolve on this same render."""
+    if target_currency == "NATIVE":
+        return []
+    failed = []
+    for c in data.get("companies", []):
+        cur = c.get("currencies", {}) or {}
+        for ccy in {cur.get("financial"), cur.get("trading")}:
+            if ccy and normalize_currency(ccy) != target_currency:
+                if get_rate(ccy, target_currency, fx_signature) is None:
+                    failed.append(c["ticker"])
+                    break
+    return failed
+
+
+def render_currency_banner(data):
+    """Cohort-level currency flags + provenance, driven by the engine's report."""
+    cinfo = data.get("currency", {}) or {}
+    if target_currency != "NATIVE":
+        st.caption(f"💱 Display currency: **{target_currency}** — absolute figures converted at latest FX; ratios are currency-neutral.")
+    else:
+        st.caption("💱 Display currency: **Native** — each company shown in its own reporting currency.")
+
+    dc = cinfo.get("distinct_currencies", {}) or {}
+    if cinfo.get("mixed_cohort"):
+        parts = ", ".join(f"{k} ({', '.join(v)})" for k, v in dc.items())
+        if target_currency == "NATIVE":
+            st.warning(f"⚠️ Cohort mixes currencies — {parts}. Absolute figures are **not comparable** in Native mode; pick a display currency to normalize.")
+        else:
+            st.info(f"🌐 Cohort spans {len(dc)} reporting currencies — {parts}. Absolutes normalized to **{target_currency}**.")
+
+    mism = cinfo.get("intra_company_mismatch", []) or []
+    if mism:
+        st.warning(f"🏷️ ADR / dual-listing: **{', '.join(mism)}** trade and report in different currencies — EV/EBITDA & Shareholder Yield were FX-corrected to the reporting currency.")
+
+    degraded = cinfo.get("degraded", []) or []
+    if degraded:
+        st.error(f"❗ FX unavailable for **{', '.join(degraded)}** — their absolute figures are shown un-normalized.")
+
+    # Display-layer check: per company, can we actually convert its native
+    # currency to the chosen target? If not, its absolutes fall back to native
+    # and would be silently mixed into the cohort — so flag it explicitly.
+    disp_degraded = compute_display_degraded(data)
+    if disp_degraded:
+        st.error(
+            f"❗ Could not convert to **{target_currency}** for "
+            f"**{', '.join(disp_degraded)}** (no FX rate found) — their absolute "
+            "figures are shown in their native currency and are **not comparable** "
+            "with the rest of the cohort. Pick a different display currency or add a "
+            "manual rate in the Currency & FX panel."
+        )
+
+    rates = cinfo.get("rates_used", []) or []
+    if rates:
+        with st.expander("ℹ️ FX rates used (intra-company corrections)", expanded=False):
+            for r in rates:
+                st.caption(f"{r['from']}→{r['to']} = {r['rate']:.4f} · source: {r.get('source','?')} · as-of {r.get('as_of','?')}")
+
+
+# -------------------------------------------------------------------------
+# Time-series helpers (shared by Over Time view and the Data Export tab)
+# -------------------------------------------------------------------------
+
+# Metric keys that can be computed as an annual time series from the statements.
+OVERTIME_METRICS = {
+    "Revenue ($B)", "Net Income ($B)", "EBITDA ($B)",
+    "Gross Margin %", "EBITDA Margin %", "Net Margin %", "Operating Margin %",
+    "Current Ratio", "Quick Ratio", "Debt / Equity", "ROE %", "ROA %",
+    "Asset Turnover", "CCC (Days)", "Net Debt / EBITDA", "Interest Coverage",
+    "ROIC %", "DIO (Days)", "DSO (Days)", "DPO (Days)",
+}
+
+
+def company_color_map(tickers):
+    """Stable, high-contrast color per ticker, consistent across all charts."""
+    palette = (px.colors.qualitative.Bold + px.colors.qualitative.Safe +
+               px.colors.qualitative.Vivid + px.colors.qualitative.Pastel)
+    return {t: palette[i % len(palette)] for i, t in enumerate(tickers)}
+
+
+def cohort_years(companies_subset, n=5):
+    """Last `n` calendar years for which ANY selected company has statement data."""
+    yrs = set()
+    for c in companies_subset:
+        annual = (c.get('raw_data', {}) or {}).get('financials', {}).get('annual', {}) or {}
+        for stmt in annual.values():
+            if isinstance(stmt, dict):
+                for series in stmt.values():
+                    if isinstance(series, dict):
+                        for d in series.keys():
+                            ds = str(d)
+                            if re.match(r'^\d{4}-\d{2}-\d{2}', ds):
+                                yrs.add(ds[:4])
+    return sorted(yrs)[-n:]
+
+
+def make_series_computer(company, year_buckets, saved_kpis=None):
+    """Return get_series(metric) -> list aligned to `year_buckets` (None where the
+    company has no data that year). Handles built-in KPIs, saved custom-KPI
+    formulas, and raw statement line items. Values are NATIVE currency."""
+    saved_kpis = saved_kpis or {}
+    annual = (company.get('raw_data', {}) or {}).get('financials', {}).get('annual', {}) or {}
+    inc = annual.get('income_statement', {}) or {}
+    bs = annual.get('balance_sheet', {}) or {}
+    cf = annual.get('cash_flow', {}) or {}
+
+    # Map each calendar year -> this company's actual statement date key.
+    ykey = {}
+    for stmt in (inc, bs, cf):
+        for series in stmt.values():
+            if isinstance(series, dict):
+                for d in series.keys():
+                    ds = str(d)
+                    if re.match(r'^\d{4}-\d{2}-\d{2}', ds):
+                        ykey.setdefault(ds[:4], ds)
+
+    def gv(stmt, keys, dk):
+        if isinstance(keys, str):
+            keys = [keys]
+        for k in keys:
+            if k in stmt and stmt[k] and dk in stmt[k]:
+                return stmt[k][dk]
+        norm = {k.lower().replace(" ", ""): k for k in stmt.keys()}
+        for k in keys:
+            kk = k.lower().replace(" ", "")
+            if kk in norm:
+                rk = norm[kk]
+                if rk in stmt and stmt[rk] and dk in stmt[rk]:
+                    return stmt[rk][dk]
+        return None
+
+    def sd(a, b):
+        if a is None or b is None or b == 0:
+            return None
+        return a / b
+
+    REV = ["Total Revenue", "TotalRevenue", "Operating Revenue", "Revenue"]
+    EQ = ["Stockholders Equity", "Total Equity Gross Minority Interest"]
+    CASH = ["Cash And Cash Equivalents", "CashAndCashEquivalents"]
+    mc = {
+        "Revenue ($B)": lambda dk: (gv(inc, REV, dk) or 0) / 1e9,
+        "Net Income ($B)": lambda dk: (gv(inc, ["Net Income", "NetIncome"], dk) or 0) / 1e9,
+        "EBITDA ($B)": lambda dk: (gv(inc, ["EBITDA", "Normalized EBITDA"], dk) or 0) / 1e9,
+        "Gross Margin %": lambda dk: (sd((gv(inc, REV, dk) or 0) - (gv(inc, "Cost Of Revenue", dk) or 0), gv(inc, REV, dk)) or 0) * 100,
+        "EBITDA Margin %": lambda dk: (sd(gv(inc, ["EBITDA", "Normalized EBITDA"], dk), gv(inc, REV, dk)) or 0) * 100,
+        "Net Margin %": lambda dk: (sd(gv(inc, ["Net Income", "NetIncome"], dk), gv(inc, REV, dk)) or 0) * 100,
+        "Operating Margin %": lambda dk: (sd(gv(inc, ["Operating Income", "OperatingIncome"], dk), gv(inc, REV, dk)) or 0) * 100,
+        "Current Ratio": lambda dk: sd(gv(bs, ["Current Assets", "Total Current Assets"], dk), gv(bs, ["Current Liabilities", "Total Current Liabilities"], dk)) or 0,
+        "Quick Ratio": lambda dk: sd((gv(bs, ["Current Assets", "Total Current Assets"], dk) or 0) - (gv(bs, "Inventory", dk) or 0), gv(bs, ["Current Liabilities", "Total Current Liabilities"], dk)) or 0,
+        "Debt / Equity": lambda dk: sd(gv(bs, "Total Debt", dk), gv(bs, EQ, dk)) or 0,
+        "ROE %": lambda dk: (sd(gv(inc, ["Net Income", "NetIncome"], dk), gv(bs, EQ, dk)) or 0) * 100,
+        "ROA %": lambda dk: (sd(gv(inc, ["Net Income", "NetIncome"], dk), gv(bs, ["Total Assets", "TotalAssets"], dk)) or 0) * 100,
+        "Asset Turnover": lambda dk: sd(gv(inc, REV, dk), gv(bs, ["Total Assets", "TotalAssets"], dk)) or 0,
+        "CCC (Days)": lambda dk: (
+            (sd(gv(bs, "Inventory", dk), gv(inc, "Cost Of Revenue", dk)) or 0) * 365 +
+            (sd(gv(bs, ["Receivables", "Accounts Receivable"], dk), gv(inc, REV, dk)) or 0) * 365 -
+            (sd(gv(bs, ["Accounts Payable", "Payables"], dk), gv(inc, "Cost Of Revenue", dk)) or 0) * 365),
+        "Net Debt / EBITDA": lambda dk: sd((gv(bs, "Net Debt", dk) or ((gv(bs, "Total Debt", dk) or 0) - (gv(bs, CASH, dk) or 0))), gv(inc, ["EBITDA", "Normalized EBITDA"], dk)) or 0,
+        "Interest Coverage": lambda dk: sd(gv(inc, ["EBIT", "Operating Income"], dk), gv(inc, "Interest Expense", dk)) or 0,
+        "ROIC %": lambda dk: (sd((gv(inc, ["EBIT", "Operating Income"], dk) or 0) * 0.79, (gv(bs, EQ, dk) or 0) + (gv(bs, "Total Debt", dk) or 0) - (gv(bs, CASH, dk) or 0)) or 0) * 100,
+        "DIO (Days)": lambda dk: (sd(gv(bs, "Inventory", dk), gv(inc, "Cost Of Revenue", dk)) or 0) * 365,
+        "DSO (Days)": lambda dk: (sd(gv(bs, ["Receivables", "Accounts Receivable"], dk), gv(inc, REV, dk)) or 0) * 365,
+        "DPO (Days)": lambda dk: (sd(gv(bs, ["Accounts Payable", "Payables"], dk), gv(inc, "Cost Of Revenue", dk)) or 0) * 365,
+    }
+
+    def var_at(name, dk, stack):
+        if name in stack:
+            return 0
+        if name in mc:
+            try:
+                v = mc[name](dk)
+                return v if v is not None else 0
+            except Exception:
+                return 0
+        if name in saved_kpis:
+            return formula_at(saved_kpis[name], dk, stack | {name})
+        for stmt in (inc, bs, cf):
+            v = gv(stmt, [name], dk)
+            if v is not None:
+                return v
+        return 0
+
+    def formula_at(formula, dk, stack):
+        names = []
+        for n in re.findall(r"'(.*?)'", formula):
+            if n not in names:
+                names.append(n)
+        expr = formula
+        ctx = {"abs": abs, "round": round, "min": min, "max": max}
+        for i, n in enumerate(names):
+            ph = f"__v{i}__"
+            expr = expr.replace(f"'{n}'", ph)
+            ctx[ph] = var_at(n, dk, stack)
+        try:
+            r = eval(expr, {"__builtins__": None}, ctx)
+            return float(r) if r is not None else 0
+        except Exception:
+            return 0
+
+    cache = {}
+
+    def get_series(metric):
+        if metric in cache:
+            return cache[metric]
+        vals = []
+        for yb in year_buckets:
+            dk = ykey.get(yb)
+            if dk is None:
+                vals.append(None)
+                continue
+            if metric in mc:
+                try:
+                    v = mc[metric](dk)
+                except Exception:
+                    v = None
+            elif metric in saved_kpis:
+                v = formula_at(saved_kpis[metric], dk, {metric})
+            else:
+                v = None
+                for stmt in (inc, bs, cf):
+                    vv = gv(stmt, [metric], dk)
+                    if vv is not None:
+                        v = vv
+                        break
+            vals.append(round(v, 4) if isinstance(v, (int, float)) and not isinstance(v, bool) else v)
+        cache[metric] = vals
+        return vals
+
+    return get_series
+
+
+def metric_timeseries_frame(companies_subset, metric, years, computers, convert=True):
+    """DataFrame index=years, columns=tickers, for `metric`. Absolute money metrics
+    are converted to the display currency per company (each from its own currency)."""
+    is_abs = metric_is_absolute(metric)
+    data = {}
+    for c in companies_subset:
+        t = c['ticker']
+        series = computers[t](metric)
+        if is_abs and convert:
+            factor, _ = display_factor(company_currency(c, 'financial'))
+            series = [(v * factor if isinstance(v, (int, float)) and not isinstance(v, bool) else v) for v in series]
+        data[t] = series
+    df = pd.DataFrame(data, index=list(years))
+    df.index.name = "Year"
+    return df
 
 
 # -------------------------------------------------------------------------
@@ -269,7 +705,7 @@ if st.session_state.get('run_requested', False):
     else:
         t_list = [t.strip() for t in tickers_text.split(",") if t.strip()]
         with st.spinner("Requesting analysis from backend..."):
-            data = get_data(t_list)
+            data = get_data(t_list, fx_signature)
             if data:
                 st.session_state['data'] = data
                 st.session_state['run_requested'] = False
@@ -292,24 +728,28 @@ if 'data' in st.session_state:
         # Analyst Note
         note = generate_analyst_note(focus_company, companies)
         st.info(f"🤖 **Analyst Insight**: {note}")
+
+        # Currency flags + provenance
+        render_currency_banner(data)
         
         # --- Tabs ---
-    tabs = st.tabs(["🏆 Strategic Comparison", "💎 DuPont Analysis", "📊 Financial Statements", "🧪 Advanced Sandbox", "📑 Deep Dive"])
+    tabs = st.tabs(["🏆 Strategic Comparison", "💎 DuPont Analysis", "📊 Financial Statements", "🧪 Advanced Sandbox", "📑 Deep Dive", "📤 Data Export"])
     
     # 1. Strategic Comparison (Heatmap + Charts)
     with tabs[0]:
         st.subheader("Comparative Analysis")
         
         # Focus Selector — dynamically add Custom KPIs if any have been saved
-        focus_options = ["Overview", "Liquidity", "Solvency", "Efficiency", "Returns"]
-        
+        focus_options = ["Overview", "Liquidity", "Solvency", "Efficiency", "Returns", "Valuation"]
+
         # Define Metrics per Focus
         metric_groups = {
             "Overview": ["Revenue ($B)", "Revenue CAGR (3y)", "Gross Margin %", "EBITDA Margin %", "Net Margin %", "ROIC %", "CCC (Days)"],
             "Liquidity": ["Current Ratio", "Quick Ratio", "Cash Ratio", "CCC (Days)", "DIO (Days)", "DSO (Days)", "DPO (Days)"],
             "Solvency": ["Net Debt / EBITDA", "Interest Coverage", "Debt / Equity", "Financial Leverage", "Quick Ratio"],
             "Efficiency": ["Asset Turnover", "ROIC %", "ROE %", "Fixed Asset Turnover", "CCC (Days)"],
-            "Returns": ["ROE %", "ROIC %", "Shareholder Yield %", "Net Margin %", "Dupont ROE"]
+            "Returns": ["ROE %", "ROIC %", "Shareholder Yield %", "Net Margin %", "Dupont ROE"],
+            "Valuation": ["Market Cap ($B)", "Enterprise Value ($B)", "Revenue ($B)", "Net Income ($B)", "EBITDA ($B)", "EV/EBITDA", "P/E Ratio"]
         }
         
         # Add Custom KPIs focus mode if any saved
@@ -329,15 +769,16 @@ if 'data' in st.session_state:
             for c in companies:
                 row = {"Ticker": c['ticker']}
                 for m in metrics_to_show:
-                    # Handle missing keys gracefully
-                    row[m] = c['metrics'].get(m, 0)
+                    # Handle missing keys gracefully; convert absolutes to display ccy
+                    row[metric_label(m)] = metric_value(c, m)
                 matrix.append(row)
-            
+
             df_heat = pd.DataFrame(matrix).set_index("Ticker")
             st.dataframe(
-                df_heat.style.background_gradient(cmap="RdYlGn", axis=0), 
+                df_heat.style.background_gradient(cmap="RdYlGn", axis=0),
                 use_container_width=True
             )
+            st.caption(currency_note())
             
         # B. Individual KPI Graphics
         st.markdown(f"### Key {focus_mode} Indicators")
@@ -373,6 +814,10 @@ if 'data' in st.session_state:
             "P/E": {"formula": "Market Price / Earnings Per Share", "meaning": "Price-to-Earnings ratio. How much investors pay per dollar of earnings.", "source": "Market Data + Income Statement"},
             "P/B": {"formula": "Market Price / Book Value Per Share", "meaning": "Price-to-Book ratio. >1 means market values company above its book value.", "source": "Market Data + Balance Sheet"},
             "Dividend Yield %": {"formula": "Annual Dividends Per Share / Share Price × 100", "meaning": "Annual dividend income as % of share price.", "source": "Market Data"},
+            "Net Income ($B)": {"formula": "Net Income / 1,000,000,000", "meaning": "Bottom-line profit in billions (converted to the display currency).", "source": "Income Statement"},
+            "EBITDA ($B)": {"formula": "EBITDA / 1,000,000,000", "meaning": "Earnings before interest, taxes, depreciation & amortization, in billions.", "source": "Income Statement"},
+            "Market Cap ($B)": {"formula": "Share Price × Shares Outstanding / 1e9", "meaning": "Total equity market value in billions (trading currency, converted to display).", "source": "Market Data"},
+            "Enterprise Value ($B)": {"formula": "(Market Cap + Net Debt) / 1e9", "meaning": "Total firm value (equity + net debt) in billions. Market cap is FX-aligned to the reporting currency before summing — fixing the ADR mismatch.", "source": "Market Data + Balance Sheet"},
         }
         
         view_mode = st.radio("View", ["📊 Bar Charts", "🎯 Gauge View", "📈 Over Time"], horizontal=True, key="chart_view_mode")
@@ -394,15 +839,15 @@ if 'data' in st.session_state:
                     for c in companies:
                         chart_data.append({
                             "Ticker": c['ticker'],
-                            "Value": c['metrics'].get(metric, 0),
+                            "Value": metric_value(c, metric),
                             "Color": '#38bdf8' if c['ticker'] == focus_ticker else '#334155'
                         })
                     df_chart = pd.DataFrame(chart_data)
-                    
+
                     fig = px.bar(
                         df_chart, x="Ticker", y="Value", color="Ticker",
                         color_discrete_map={row['Ticker']: row['Color'] for _, row in df_chart.iterrows()},
-                        title=metric
+                        title=metric_label(metric)
                     )
                     fig.update_layout(
                         showlegend=False,
@@ -430,10 +875,10 @@ if 'data' in st.session_state:
                 
                 for g_idx, metric in enumerate(row_metrics):
                     with gauge_cols[g_idx]:
-                        focus_val = focus_company['metrics'].get(metric, 0)
+                        focus_val = metric_value(focus_company, metric)
                         if focus_val is None: focus_val = 0
-                        
-                        cohort_vals = [c['metrics'].get(metric, 0) for c in companies]
+
+                        cohort_vals = [metric_value(c, metric) for c in companies]
                         cohort_vals = [v for v in cohort_vals if v is not None]
                         if not cohort_vals: cohort_vals = [0]
                         
@@ -470,7 +915,7 @@ if 'data' in st.session_state:
                         fig = go.Figure(go.Indicator(
                             mode="gauge+number+delta",
                             value=focus_val,
-                            title={"text": f"<b style='font-size:15px'>{metric}</b><br><span style='font-size:12px;color:#888'>{focus_ticker} vs cohort avg</span>", "font": {"size": 16}},
+                            title={"text": f"<b style='font-size:15px'>{metric_label(metric)}</b><br><span style='font-size:12px;color:#888'>{focus_ticker} vs cohort avg</span>", "font": {"size": 16}},
                             number={"font": {"size": 36, "color": bar_color}, "valueformat": ",.2f" if abs(focus_val) < 100 else ",.0f"},
                             delta={
                                 "reference": cohort_avg, "relative": False, "valueformat": ".2f",
@@ -502,224 +947,110 @@ if 'data' in st.session_state:
                         st.markdown("---")
         
         else:
-            # --- Over Time View (Focus company metrics across years) ---
-            st.caption(f"📈 Showing **{focus_ticker}** metrics computed from annual financial statements over the last 5 years.")
-            
-            raw = focus_company.get('raw_data', {}).get('financials', {}).get('annual', {})
-            inc = raw.get('income_statement', {})
-            bs = raw.get('balance_sheet', {})
-            cf = raw.get('cash_flow', {})
-            
-            def safe_div_ts(a, b):
-                if a is None or b is None or b == 0: return None
-                return a / b
-            
-            # Get all available years from income statement, filtering for valid dates
-            rev_key = next((k for k in ["Total Revenue", "TotalRevenue", "Operating Revenue", "Revenue"] if k in inc), None)
-            
-            all_years = []
-            if rev_key and inc[rev_key]:
-                # robust Sort only valid YYYY-MM-DD keys
-                valid_years = [y for y in inc[rev_key].keys() if re.match(r'^\d{4}-\d{2}-\d{2}', str(y))]
-                all_years = sorted(valid_years)[-5:]
-            
-            if not all_years:
-                year_candidates = set()
-                for stmt in (inc, bs, cf):
-                    for series in stmt.values():
-                        if isinstance(series, dict):
-                            for y in series.keys():
-                                if re.match(r'^\d{4}-\d{2}-\d{2}', str(y)):
-                                    year_candidates.add(y)
-                all_years = sorted(year_candidates)[-5:]
-            
-            if not all_years:
+            # --- Over Time View (multi-company) ---
+            st.caption(
+                "📈 KPIs computed from annual financial statements. "
+                + (f"Absolute figures (Revenue, Net Income, EBITDA) converted to **{target_currency}** per company at the latest FX rate; ratios are currency-neutral."
+                   if target_currency != "NATIVE"
+                   else "Absolute figures shown in each company's native currency.")
+            )
+
+            ot_selected = st.multiselect(
+                "Companies to plot",
+                options=ticker_list,
+                default=ticker_list,
+                key="overtime_companies",
+            )
+            if not ot_selected:
+                st.info("Select at least one company to plot.")
+                ot_selected = [focus_ticker]
+
+            sel_companies = [c for c in companies if c['ticker'] in ot_selected]
+            years = cohort_years(sel_companies)
+
+            if not years:
                 st.warning("No annual statement data available for time series.")
-            
-            if all_years:
-                def get_val(stmt, keys, year):
-                    """Get a value for a specific year from a statement, trying multiple key names and fuzzy matching."""
-                    if isinstance(keys, str): keys = [keys]
-                    
-                    # 1. Try exact match
-                    for k in keys:
-                        if k in stmt and stmt[k] and year in stmt[k]:
-                            return stmt[k][year]
-                    
-                    # 2. Try fuzzy match (case/space insensitive)
-                    stmt_norm = {k.lower().replace(" ", ""): k for k in stmt.keys()}
-                    for k in keys:
-                        k_norm = k.lower().replace(" ", "")
-                        if k_norm in stmt_norm:
-                            real_k = stmt_norm[k_norm]
-                            if real_k in stmt and stmt[real_k] and year in stmt[real_k]:
-                                return stmt[real_k][year]
-                                
-                    return None
-                
-                # Compute KPIs per year
-                kpi_time_series = {}
-                
-                # Map metric names to computation functions
-                metric_computations = {
-                    "Revenue ($B)": lambda y: (get_val(inc, ["Total Revenue", "TotalRevenue", "Operating Revenue", "Revenue"], y) or 0) / 1e9,
-                    "Gross Margin %": lambda y: (safe_div_ts(
-                        (get_val(inc, ["Total Revenue", "TotalRevenue", "Operating Revenue", "Revenue"], y) or 0) - (get_val(inc, "Cost Of Revenue", y) or 0),
-                        get_val(inc, ["Total Revenue", "TotalRevenue", "Operating Revenue", "Revenue"], y)) or 0) * 100,
-                    "EBITDA Margin %": lambda y: (safe_div_ts(get_val(inc, ["EBITDA", "Normalized EBITDA"], y), get_val(inc, ["Total Revenue", "TotalRevenue", "Operating Revenue", "Revenue"], y)) or 0) * 100,
-                    "Net Margin %": lambda y: (safe_div_ts(get_val(inc, ["Net Income", "NetIncome"], y), get_val(inc, ["Total Revenue", "TotalRevenue", "Operating Revenue", "Revenue"], y)) or 0) * 100,
-                    "Operating Margin %": lambda y: (safe_div_ts(get_val(inc, ["Operating Income", "OperatingIncome"], y), get_val(inc, ["Total Revenue", "TotalRevenue", "Operating Revenue", "Revenue"], y)) or 0) * 100,
-                    "Current Ratio": lambda y: safe_div_ts(get_val(bs, ["Current Assets", "Total Current Assets"], y), get_val(bs, ["Current Liabilities", "Total Current Liabilities"], y)) or 0,
-                    "Quick Ratio": lambda y: safe_div_ts((get_val(bs, ["Current Assets", "Total Current Assets"], y) or 0) - (get_val(bs, "Inventory", y) or 0), get_val(bs, ["Current Liabilities", "Total Current Liabilities"], y)) or 0,
-                    "Debt / Equity": lambda y: safe_div_ts(get_val(bs, "Total Debt", y), get_val(bs, ["Stockholders Equity", "Total Equity Gross Minority Interest"], y)) or 0,
-                    "ROE %": lambda y: (safe_div_ts(get_val(inc, ["Net Income", "NetIncome"], y), get_val(bs, ["Stockholders Equity", "Total Equity Gross Minority Interest"], y)) or 0) * 100,
-                    "ROA %": lambda y: (safe_div_ts(get_val(inc, ["Net Income", "NetIncome"], y), get_val(bs, ["Total Assets", "TotalAssets"], y)) or 0) * 100,
-                    "Asset Turnover": lambda y: safe_div_ts(get_val(inc, ["Total Revenue", "TotalRevenue", "Operating Revenue", "Revenue"], y), get_val(bs, ["Total Assets", "TotalAssets"], y)) or 0,
-                    "CCC (Days)": lambda y: (
-                        (safe_div_ts(get_val(bs, "Inventory", y), get_val(inc, "Cost Of Revenue", y)) or 0) * 365 +
-                        (safe_div_ts(get_val(bs, ["Receivables", "Accounts Receivable"], y), get_val(inc, ["Total Revenue", "TotalRevenue", "Operating Revenue", "Revenue"], y)) or 0) * 365 -
-                        (safe_div_ts(get_val(bs, ["Accounts Payable", "Payables"], y), get_val(inc, "Cost Of Revenue", y)) or 0) * 365
-                    ),
-                    "Net Debt / EBITDA": lambda y: safe_div_ts(
-                        (get_val(bs, "Net Debt", y) or ((get_val(bs, "Total Debt", y) or 0) - (get_val(bs, ["Cash And Cash Equivalents", "CashAndCashEquivalents"], y) or 0))),
-                        get_val(inc, ["EBITDA", "Normalized EBITDA"], y)) or 0,
-                    "Interest Coverage": lambda y: safe_div_ts(get_val(inc, ["EBIT", "Operating Income"], y), get_val(inc, "Interest Expense", y)) or 0,
-                    "ROIC %": lambda y: (safe_div_ts(
-                        (get_val(inc, ["EBIT", "Operating Income"], y) or 0) * 0.79,
-                        (get_val(bs, ["Stockholders Equity", "Total Equity Gross Minority Interest"], y) or 0) + (get_val(bs, "Total Debt", y) or 0) - (get_val(bs, ["Cash And Cash Equivalents", "CashAndCashEquivalents"], y) or 0)
-                    ) or 0) * 100,
-                    "DIO (Days)": lambda y: (safe_div_ts(get_val(bs, "Inventory", y), get_val(inc, "Cost Of Revenue", y)) or 0) * 365,
-                    "DSO (Days)": lambda y: (safe_div_ts(get_val(bs, ["Receivables", "Accounts Receivable"], y), get_val(inc, ["Total Revenue", "TotalRevenue", "Operating Revenue", "Revenue"], y)) or 0) * 365,
-                    "DPO (Days)": lambda y: (safe_div_ts(get_val(bs, ["Accounts Payable", "Payables"], y), get_val(inc, "Cost Of Revenue", y)) or 0) * 365,
-                }
-                
+            else:
                 saved_kpis = st.session_state.get('saved_sandbox_kpis', {})
-                series_cache = {}
-                
-                def get_statement_value(year, var_name):
-                    """Try to fetch a raw statement line item for a given year."""
-                    for stmt in (inc, bs, cf):
-                        val = get_val(stmt, var_name, year)
-                        if val is not None:
-                            return val
-                    return None
-                
-                def compile_formula(formula):
-                    raw_vars = re.findall(r"'(.*?)'", formula)
-                    needed_vars = []
-                    for v_name in raw_vars:
-                        if v_name not in needed_vars:
-                            needed_vars.append(v_name)
-                    eval_formula = formula
-                    placeholders = {}
-                    for idx, v_name in enumerate(needed_vars):
-                        placeholder = f"__v{idx}__"
-                        eval_formula = eval_formula.replace(f"'{v_name}'", placeholder)
-                        placeholders[v_name] = placeholder
-                    return eval_formula, placeholders, needed_vars
-                
-                def compute_formula_series(formula, stack):
-                    eval_formula, placeholders, needed_vars = compile_formula(formula)
-                    series_by_var = {v_name: get_series_for_key(v_name, stack) for v_name in needed_vars}
-                    values = []
-                    for idx, _ in enumerate(all_years):
-                        eval_context = {"abs": abs, "round": round, "min": min, "max": max}
-                        for v_name, placeholder in placeholders.items():
-                            eval_context[placeholder] = series_by_var[v_name][idx]
-                        try:
-                            result = eval(eval_formula, {"__builtins__": None}, eval_context)
-                            values.append(round(float(result), 2) if result is not None else 0)
-                        except Exception:
-                            values.append(0)
-                    return values
-                
-                def get_series_for_key(key_name, stack=None):
-                    if key_name in series_cache:
-                        return series_cache[key_name]
-                    
-                    if stack is None:
-                        stack = set()
-                    if key_name in stack:
-                        series_cache[key_name] = [0] * len(all_years)
-                        return series_cache[key_name]
-                    
-                    stack.add(key_name)
-                    try:
-                        if key_name in saved_kpis:
-                            values = compute_formula_series(saved_kpis[key_name], stack)
-                        elif key_name in metric_computations:
-                            values = [metric_computations[key_name](y) for y in all_years]
-                        else:
-                            values = []
-                            for y in all_years:
-                                val = get_statement_value(y, key_name)
-                                values.append(val if val is not None else 0)
-                        series_cache[key_name] = values
-                        return values
-                    finally:
-                        stack.remove(key_name)
-                
-                # Only compute for metrics currently shown
-                for metric in metrics_to_show:
-                    if metric in metric_computations or metric in saved_kpis:
-                        try:
-                            kpi_time_series[metric] = get_series_for_key(metric)
-                        except: pass
-                
-                # Year labels
-                year_labels = [y[:4] for y in all_years]
-                
-                # Plot in a 2-column grid
-                computed_metrics = [m for m in metrics_to_show if m in kpi_time_series]
-                for row_start in range(0, len(computed_metrics), 2):
-                    row_metrics = computed_metrics[row_start:row_start + 2]
+                computers = {c['ticker']: make_series_computer(c, years, saved_kpis) for c in sel_companies}
+                cmap = company_color_map(ticker_list)
+                single = len(sel_companies) == 1
+
+                computable = [m for m in metrics_to_show if (m in OVERTIME_METRICS or m in saved_kpis)]
+                skipped = [m for m in metrics_to_show if m not in computable]
+                if skipped:
+                    st.caption("⏭️ No annual series for: " + ", ".join(skipped)
+                               + " (point-in-time metrics like Market Cap / EV / P/E).")
+                if not computable:
+                    st.info("No time-series metrics in this focus group — try Overview, Returns, or Efficiency.")
+
+                for row_start in range(0, len(computable), 2):
+                    row_metrics = computable[row_start:row_start + 2]
                     ts_cols = st.columns(len(row_metrics))
-                    
                     for t_idx, metric in enumerate(row_metrics):
                         with ts_cols[t_idx]:
-                            vals = kpi_time_series[metric]
-                            
-                            # Determine trend direction
-                            change_pct = 0
-                            trend_arrow = "➡️"
-                            
-                            if len(vals) >= 2 and vals[-1] is not None and vals[0] is not None:
-                                if abs(vals[0]) > 0.001:
-                                    change_pct = ((vals[-1] - vals[0]) / abs(vals[0])) * 100
-                                    trend_arrow = "📈" if change_pct > 0 else "📉" if change_pct < 0 else "➡️"
-                            
-                            fig_ts = go.Figure()
-                            fig_ts.add_trace(go.Scatter(
-                                x=year_labels, y=vals,
-                                mode='lines+markers+text',
-                                line=dict(width=3, color='#38bdf8'),
-                                marker=dict(size=8, color='#38bdf8'),
-                                text=[f"{v:.1f}" if v is not None else "" for v in vals],
-                                textposition="top center",
-                                textfont=dict(size=11),
-                                fill='tozeroy',
-                                fillcolor='rgba(56, 189, 248, 0.08)',
-                            ))
-                            
+                            df_m = metric_timeseries_frame(sel_companies, metric, years, computers)
+                            is_abs = metric_is_absolute(metric)
+                            title = metric_label(metric)
+
+                            long_df = df_m.reset_index().melt(
+                                id_vars="Year", var_name="Company", value_name="Value")
+
+                            if is_abs:
+                                # Bar chart: magnitude differences don't distort a categorical bar
+                                fig_ts = px.bar(
+                                    long_df, x="Year", y="Value", color="Company",
+                                    barmode="group", color_discrete_map=cmap, title=title,
+                                )
+                            else:
+                                # Line chart for ratios / margins (% and x multiples)
+                                fig_ts = px.line(
+                                    long_df, x="Year", y="Value", color="Company",
+                                    markers=True, color_discrete_map=cmap, title=title,
+                                )
+                                fig_ts.update_traces(line=dict(width=2.5), marker=dict(size=8))
+                                if not single and focus_ticker in df_m.columns:
+                                    fig_ts.update_traces(selector=dict(name=focus_ticker),
+                                                         line=dict(width=4.5))
+
+                            # Full-precision value on hover (no abbreviation)
+                            fig_ts.update_traces(
+                                hovertemplate="%{fullData.name} · %{x}<br>%{y:,.4f}<extra></extra>")
+
+                            # Inline value labels only when a single company is shown
+                            if single:
+                                only = sel_companies[0]['ticker']
+                                labels = [("" if v is None else f"{v:,.1f}") for v in df_m[only].tolist()]
+                                fig_ts.update_traces(
+                                    text=labels,
+                                    textposition=("outside" if is_abs else "top center"),
+                                    textfont=dict(size=11))
+
                             fig_ts.update_layout(
-                                title=f"{trend_arrow} {metric}",
-                                height=280,
-                                margin=dict(l=10, r=10, t=40, b=10),
+                                height=340,
+                                margin=dict(l=10, r=10, t=46, b=10),
                                 paper_bgcolor='rgba(0,0,0,0)',
                                 plot_bgcolor='rgba(0,0,0,0)',
-                                yaxis=dict(showgrid=True, gridcolor='rgba(128,128,128,0.15)'),
-                                xaxis=dict(showgrid=False),
-                                showlegend=False,
+                                yaxis=dict(showgrid=True, gridcolor='rgba(128,128,128,0.15)', title=None),
+                                xaxis=dict(type='category', showgrid=False, title=None),  # categorical -> no 2022.5 ticks
+                                showlegend=(not single),
+                                legend=dict(orientation='h', yanchor='top', y=-0.18, x=0,
+                                            font=dict(size=10), title=None),
+                                bargap=0.25, bargroupgap=0.05,
                             )
                             st.plotly_chart(fig_ts, use_container_width=True)
-                            
-                            # Latest value
-                            if len(vals) >= 1:
-                                st.caption(f"Latest: **{vals[-1]:.2f}**")
-                            
+
+                            with st.expander("📋 Data table (copy / download)", expanded=False):
+                                st.dataframe(df_m, use_container_width=True)
+                                st.download_button(
+                                    "⬇️ CSV", df_m.to_csv(),
+                                    file_name=f"{metric}_over_time.csv", mime="text/csv",
+                                    key=f"ot_dl_{row_start}_{t_idx}",
+                                )
+
                             fc = formula_caption(metric)
                             if fc:
-                                with st.expander("ℹ️", expanded=False):
+                                with st.expander("ℹ️ Formula", expanded=False):
                                     st.caption(fc)
 
     # 2. DuPont Analysis (Redesigned)
@@ -754,8 +1085,9 @@ if 'data' in st.session_state:
 
         # --- D. Strategic Positioning Scatter (Enhanced) ---
         st.markdown("### 🎯 Strategic Positioning Map")
-        st.caption("High Margin (Premium/IP-driven) vs High Turnover (Volume/Retail). Bubble size = Revenue.")
+        st.caption("High Margin (Premium/IP-driven) vs High Turnover (Volume/Retail). Bubble size = Revenue. " + currency_note())
         
+        _rev_lbl = metric_label('Revenue ($B)')  # currency-aware label for the bubble dim
         scatter_data = []
         for c in companies:
             scatter_data.append({
@@ -763,19 +1095,19 @@ if 'data' in st.session_state:
                 "Net Margin %": c['metrics'].get('Net Margin %', 0),
                 "Asset Turnover": c['metrics'].get('Asset Turnover', 0),
                 "ROE %": c['metrics'].get('ROE %', 0),
-                "Revenue ($B)": max(c['metrics'].get('Revenue ($B)', 0.1), 0.1),
+                _rev_lbl: max(metric_value(c, 'Revenue ($B)') or 0.1, 0.1),
             })
-        
+
         df_scatter = pd.DataFrame(scatter_data)
-        
+
         fig_dupont = px.scatter(
             df_scatter,
             x="Asset Turnover",
             y="Net Margin %",
-            size="Revenue ($B)",
+            size=_rev_lbl,
             color="ROE %",
             text="Ticker",
-            hover_data=["ROE %", "Revenue ($B)"],
+            hover_data=["ROE %", _rev_lbl],
             title="",
             color_continuous_scale="RdYlGn",
             size_max=60
@@ -800,9 +1132,27 @@ if 'data' in st.session_state:
     with tabs[2]:
         st.subheader(f"Financials: {focus_ticker}")
         stmt_type = st.radio("Statement Type", ["income_statement", "balance_sheet", "cash_flow"], horizontal=True, format_func=lambda x: x.replace("_", " ").title())
-        
+
+        _stmt_fin = company_currency(focus_company, "financial")
         df_stmt = get_financial_statement(focus_company, stmt_type)
-        
+
+        _convert_stmt = False
+        if target_currency != "NATIVE" and _stmt_fin and normalize_currency(_stmt_fin) != target_currency:
+            _convert_stmt = st.checkbox(
+                f"Convert to {target_currency}", value=False,
+                help="Statements are shown in the reporting currency by default for auditability.",
+            )
+        if _convert_stmt:
+            _f, _sc = display_factor(_stmt_fin)
+            if _sc == target_currency:
+                # Conversion actually resolved (the checkbox guard rules out identity).
+                df_stmt = df_stmt * _f
+                st.caption(f"Converted to **{target_currency}** at the latest FX rate (×{_f:.4f}).")
+            else:
+                st.warning(f"FX rate {_stmt_fin}→{target_currency} unavailable — showing **{_stmt_fin}** (not converted).")
+        else:
+            st.caption(f"Reported in **{_stmt_fin or 'native currency'}**.")
+
         if not df_stmt.empty:
             st.dataframe(df_stmt.style.format("{:,.0f}"), height=600, use_container_width=True)
         else:
@@ -811,7 +1161,10 @@ if 'data' in st.session_state:
     # 4. Advanced Sandbox 3.0
     with tabs[3]:
         st.subheader("🧪 Custom KPI Lab")
-        
+
+        if data.get('currency', {}).get('mixed_cohort'):
+            st.warning("⚠️ This cohort mixes currencies. Raw statement values below are in each company's native reporting currency and are **not** FX-converted here — cross-company comparisons and currency-mixing formulas can be misleading.")
+
         import re
         
         # --- Collect available variables ---
@@ -1139,9 +1492,19 @@ if 'data' in st.session_state:
         
         try:
             cf = focus_company['raw_data']['financials']['annual']['cash_flow']
-            
+
+            # Cash flow is in the reporting currency; convert to display currency.
+            _cf_fin = company_currency(focus_company, "financial")
+            cf_factor, cf_ccy = display_factor(_cf_fin)
+            sym = currency_symbol(cf_ccy)
+            unit = money_suffix(cf_ccy)  # e.g. "(B EUR)"
+
+            def b(v):
+                """Native value -> display currency, in billions."""
+                return (v * cf_factor) / 1e9
+
             def get_latest_val(key):
-                """Get latest year value from cash flow dict."""
+                """Get latest year value from cash flow dict (native currency)."""
                 if key in cf and cf[key]:
                     val = list(cf[key].values())[0]
                     return val if val is not None else 0
@@ -1152,15 +1515,15 @@ if 'data' in st.session_state:
             div = get_latest_val("Cash Dividends Paid")
             buyback = get_latest_val("Repurchase Of Capital Stock")
             acq = get_latest_val("Net Business Purchase And Sale")
-            
+
             # Compute remaining
             remaining = ocf + capex + div + buyback + acq  # capex/div/buyback are usually negative
-            
+
             if ocf < 0:
                 # When OCF is negative, show a simple bar chart instead of waterfall
                 # because waterfall doesn't make intuitive sense with a negative starting point
-                st.warning(f"⚠️ Operating Cash Flow is **negative** (${ocf/1e9:.2f}B). The company burned cash from operations this period.")
-                
+                st.warning(f"⚠️ Operating Cash Flow is **negative** ({sym}{b(ocf):.2f}B). The company burned cash from operations this period.")
+
                 cf_items = {
                     "Operating CF": ocf,
                     "Capex": capex,
@@ -1170,72 +1533,73 @@ if 'data' in st.session_state:
                 }
                 # Filter out zero items
                 cf_items = {k: v for k, v in cf_items.items() if v != 0}
-                
+
                 fig_cf = px.bar(
-                    x=list(cf_items.keys()), y=[v/1e9 for v in cf_items.values()],
-                    title="Cash Flow Components ($B)",
+                    x=list(cf_items.keys()), y=[b(v) for v in cf_items.values()],
+                    title=f"Cash Flow Components {unit}",
                     color=[v > 0 for v in cf_items.values()],
                     color_discrete_map={True: "#4ade80", False: "#f87171"},
-                    labels={"x": "", "y": "$ Billions", "color": ""},
+                    labels={"x": "", "y": f"{cf_ccy} Billions", "color": ""},
                 )
                 fig_cf.update_layout(
                     showlegend=False, height=400,
                     paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
                     yaxis=dict(showgrid=True, gridcolor='rgba(255,255,255,0.08)'),
                 )
-                fig_cf.update_traces(text=[f"${v/1e9:.1f}B" for v in cf_items.values()], textposition="outside")
+                fig_cf.update_traces(text=[f"{sym}{b(v):.1f}B" for v in cf_items.values()], textposition="outside")
                 st.plotly_chart(fig_cf, use_container_width=True)
             else:
                 # Normal waterfall for positive OCF
                 labels = ["Operating Cash Flow"]
-                values = [ocf / 1e9]
+                values = [b(ocf)]
                 measures = ["absolute"]
-                
+
                 if capex != 0:
                     labels.append("Capex")
-                    values.append(capex / 1e9)
+                    values.append(b(capex))
                     measures.append("relative")
                 if div != 0:
                     labels.append("Dividends")
-                    values.append(div / 1e9)
+                    values.append(b(div))
                     measures.append("relative")
                 if buyback != 0:
                     labels.append("Buybacks")
-                    values.append(buyback / 1e9)
+                    values.append(b(buyback))
                     measures.append("relative")
                 if acq != 0:
                     labels.append("M&A")
-                    values.append(acq / 1e9)
+                    values.append(b(acq))
                     measures.append("relative")
-                    
+
                 labels.append("Remaining")
                 values.append(0)
                 measures.append("total")
-                
+
                 fig_bridge = go.Figure(go.Waterfall(
                     orientation="v",
                     measure=measures,
                     x=labels,
                     y=values,
                     textposition="outside",
-                    text=[f"${v:.1f}B" for v in values[:-1]] + [f"${remaining/1e9:.1f}B"],
+                    text=[f"{sym}{v:.1f}B" for v in values[:-1]] + [f"{sym}{b(remaining):.1f}B"],
                     connector={"line": {"color": "rgba(255,255,255,0.2)"}},
                     increasing={"marker": {"color": "#4ade80"}},
                     decreasing={"marker": {"color": "#f87171"}},
                     totals={"marker": {"color": "#60a5fa"}},
                 ))
-                
+
                 fig_bridge.update_layout(
-                    title="Cash Flow Allocation Waterfall ($B)",
+                    title=f"Cash Flow Allocation Waterfall {unit}",
                     showlegend=False,
                     height=450,
                     paper_bgcolor='rgba(0,0,0,0)',
                     plot_bgcolor='rgba(0,0,0,0)',
-                    yaxis=dict(showgrid=True, gridcolor='rgba(255,255,255,0.08)', title="$ Billions"),
+                    yaxis=dict(showgrid=True, gridcolor='rgba(255,255,255,0.08)', title=f"{cf_ccy} Billions"),
                     xaxis=dict(showgrid=False),
                 )
                 st.plotly_chart(fig_bridge, use_container_width=True)
-            
+            st.caption(currency_note())
+
         except Exception as e:
             st.warning(f"Could not build Capital Allocation Bridge: {e}")
 
@@ -1262,35 +1626,45 @@ if 'data' in st.session_state:
         
         trend_cols = st.columns(len(trend_metrics))
         
-        for t_idx, (metric_label, stmt_name, key_opts) in enumerate(trend_metrics):
+        _trend_suffix = money_suffix(target_currency) if target_currency != "NATIVE" else "($B)"
+        for t_idx, (trend_label, stmt_name, key_opts) in enumerate(trend_metrics):
             with trend_cols[t_idx]:
                 fig_trend = go.Figure()
-                
+
                 for c in companies:
                     series = extract_annual_series(c, stmt_name, key_opts)
                     if series:
                         sorted_dates = sorted(series.keys())
                         dates = sorted_dates[-5:]  # last 5 years
-                        vals = [(series[d] / 1e9 if series[d] is not None else 0) for d in dates]  # Convert to billions
+                        # Each company converted from its own reporting currency.
+                        _ccy_c = company_currency(c, "financial")
+                        _cf, _shown_c = display_factor(_ccy_c)
+                        vals = [((series[d] * _cf / 1e9) if series[d] is not None else 0) for d in dates]
                         # Use year labels
                         years = [d[:4] if len(d) >= 4 else d for d in dates]
-                        
+
+                        # If this company's FX conversion failed, its line is in its
+                        # native currency, not the axis label — mark it.
+                        _trace_name = c['ticker']
+                        if target_currency != "NATIVE" and _ccy_c and _shown_c != target_currency:
+                            _trace_name = f"{c['ticker']} (native {_ccy_c})"
+
                         fig_trend.add_trace(go.Scatter(
                             x=years, y=vals,
                             mode='lines+markers',
-                            name=c['ticker'],
+                            name=_trace_name,
                             line=dict(width=3 if c['ticker'] == focus_ticker else 1.5),
                             opacity=1.0 if c['ticker'] == focus_ticker else 0.5,
                         ))
-                
+
                 fig_trend.update_layout(
-                    title=f"{metric_label} ($B)",
+                    title=f"{trend_label} {_trend_suffix}",
                     height=300,
                     margin=dict(l=0, r=0, t=40, b=0),
                     paper_bgcolor='rgba(0,0,0,0)',
                     plot_bgcolor='rgba(0,0,0,0)',
                     yaxis=dict(showgrid=True, gridcolor='rgba(255,255,255,0.08)'),
-                    xaxis=dict(showgrid=False),
+                    xaxis=dict(type='category', showgrid=False),  # categorical -> no 2022.5 ticks
                     legend=dict(font=dict(size=10), orientation="h", y=-0.2),
                     showlegend=(t_idx == 0),  # Only show legend on first chart
                 )
@@ -1312,25 +1686,28 @@ if 'data' in st.session_state:
             "🏗️ Solvency": ["Net Debt / EBITDA", "Interest Coverage", "Debt / Equity", "Financial Leverage"],
             "⚙️ Efficiency": ["Asset Turnover", "Fixed Asset Turnover", "ROIC %", "ROE %", "ROA %"],
             "🎯 Returns & Valuation": ["Dupont ROE", "Shareholder Yield %", "EV / EBITDA", "P/E", "P/B", "Dividend Yield %"],
+            "💵 Size & Value": ["Market Cap ($B)", "Enterprise Value ($B)", "Net Income ($B)", "EBITDA ($B)"],
         }
-        
-        # Compute cohort averages for comparison
+
+        # Compute cohort averages for comparison (absolutes converted to display ccy)
         cohort_avgs = {}
         for metric_list in metric_categories.values():
             for met in metric_list:
-                vals = [c['metrics'].get(met, None) for c in companies if c['metrics'].get(met) is not None]
+                vals = [metric_value(c, met) for c in companies if c['metrics'].get(met) is not None]
+                vals = [v for v in vals if v is not None]
                 if vals:
                     cohort_avgs[met] = np.mean(vals)
-        
+
         for cat_name, cat_metrics in metric_categories.items():
             with st.expander(cat_name, expanded=True):
                 n_cols = min(len(cat_metrics), 4)
                 cols = st.columns(n_cols)
                 for m_idx, met in enumerate(cat_metrics):
                     with cols[m_idx % n_cols]:
-                        val = m.get(met, None)
+                        present = m.get(met, None) is not None
+                        val = metric_value(focus_company, met) if present else None
                         avg = cohort_avgs.get(met, None)
-                        
+
                         if val is not None and avg is not None:
                             diff = val - avg
                             # Format delta string
@@ -1338,13 +1715,100 @@ if 'data' in st.session_state:
                                 delta_str = f"{diff:+,.0f} vs avg"
                             else:
                                 delta_str = f"{diff:+.2f} vs avg"
-                            st.metric(met, f"{val:,.2f}" if isinstance(val, float) else str(val), delta=delta_str, delta_color="normal")
+                            st.metric(metric_label(met), f"{val:,.2f}" if isinstance(val, float) else str(val), delta=delta_str, delta_color="normal")
                         elif val is not None:
-                            st.metric(met, f"{val:,.2f}" if isinstance(val, float) else str(val))
+                            st.metric(metric_label(met), f"{val:,.2f}" if isinstance(val, float) else str(val))
                         else:
-                            st.metric(met, "—")
+                            st.metric(metric_label(met), "—")
 
 
+
+
+    # 6. Data Export
+    with tabs[5]:
+        st.subheader("📤 Data Export")
+        st.caption(
+            "Pick companies (rows) and fields (columns), then copy or download the table. "
+            "Computed money KPIs are converted to the display currency; raw statement line "
+            "items are in each company's native reporting currency (see the Currency column)."
+        )
+
+        export_mode = st.radio(
+            "Table type",
+            ["Snapshot (companies × fields)", "Time series (one field × years)"],
+            horizontal=True, key="export_mode",
+        )
+
+        # Available fields: computed metrics + raw statement line items
+        metric_fields = sorted({k for c in companies for k in c.get('metrics', {}).keys() if k != 'Profile'})
+        raw_fields_set = set()
+        for c in companies:
+            annual = (c.get('raw_data', {}) or {}).get('financials', {}).get('annual', {}) or {}
+            for stmt in annual.values():
+                if isinstance(stmt, dict):
+                    raw_fields_set.update(stmt.keys())
+        all_export_fields = list(dict.fromkeys(metric_fields + sorted(raw_fields_set)))
+
+        if export_mode.startswith("Snapshot"):
+            ex_rows = st.multiselect("Companies (rows)", ticker_list, default=ticker_list, key="export_rows")
+            _default_cols = [c for c in ["Revenue ($B)", "Net Income ($B)", "EBITDA ($B)", "Net Margin %", "ROE %", "EV/EBITDA"] if c in metric_fields]
+            ex_cols = st.multiselect("Fields (columns)", all_export_fields, default=_default_cols, key="export_cols")
+            if ex_rows and ex_cols:
+                rows = []
+                for t in ex_rows:
+                    c = next((x for x in companies if x['ticker'] == t), None)
+                    if not c:
+                        continue
+                    row = {"Ticker": t, "Currency": company_currency(c, 'financial') or '?'}
+                    for f in ex_cols:
+                        if metric_is_absolute(f):
+                            row[metric_label(f)] = metric_value(c, f)
+                        elif f in c.get('metrics', {}):
+                            row[f] = c['metrics'].get(f)
+                        else:
+                            row[f] = get_value_for_ticker(companies, t, f)
+                    rows.append(row)
+                df_ex = pd.DataFrame(rows).set_index("Ticker")
+                st.dataframe(df_ex, use_container_width=True)
+                st.download_button("⬇️ Download CSV", df_ex.to_csv(), "export_snapshot.csv", "text/csv")
+                with st.expander("📋 Copy values (TSV — paste straight into Excel / Sheets)"):
+                    st.code(df_ex.to_csv(sep='\t'), language=None)
+            else:
+                st.info("Select at least one company and one field.")
+        else:
+            ts_options = [m for m in metric_fields if m in OVERTIME_METRICS] + sorted(st.session_state.get('saved_sandbox_kpis', {}).keys())
+            if not ts_options:
+                st.info("No time-series fields available for this cohort.")
+            else:
+                ts_field = st.selectbox("Field (one annual KPI)", ts_options, key="export_ts_field")
+                ex_rows = st.multiselect("Companies", ticker_list, default=ticker_list, key="export_ts_rows")
+                sel = [c for c in companies if c['ticker'] in ex_rows]
+                years = cohort_years(sel)
+                if ts_field and sel and years:
+                    computers = {c['ticker']: make_series_computer(c, years, st.session_state.get('saved_sandbox_kpis', {})) for c in sel}
+                    df_ts = metric_timeseries_frame(sel, ts_field, years, computers)
+                    st.dataframe(df_ts, use_container_width=True)
+                    st.download_button("⬇️ Download CSV", df_ts.to_csv(), "export_timeseries.csv", "text/csv")
+                    with st.expander("📋 Copy values (TSV — paste straight into Excel / Sheets)"):
+                        st.code(df_ts.to_csv(sep='\t'), language=None)
+
+                    # Quick chart of the exported series
+                    is_abs = metric_is_absolute(ts_field)
+                    long_x = df_ts.reset_index().melt(id_vars="Year", var_name="Company", value_name="Value")
+                    cmapx = company_color_map(ticker_list)
+                    if is_abs:
+                        figx = px.bar(long_x, x="Year", y="Value", color="Company", barmode="group", color_discrete_map=cmapx, title=metric_label(ts_field))
+                    else:
+                        figx = px.line(long_x, x="Year", y="Value", color="Company", markers=True, color_discrete_map=cmapx, title=metric_label(ts_field))
+                    figx.update_traces(hovertemplate="%{fullData.name} · %{x}<br>%{y:,.4f}<extra></extra>")
+                    figx.update_layout(
+                        height=400, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+                        xaxis=dict(type='category', title=None), yaxis=dict(title=None),
+                        legend=dict(orientation='h', y=-0.2, font=dict(size=10)),
+                    )
+                    st.plotly_chart(figx, use_container_width=True)
+                else:
+                    st.info("Pick a field and at least one company.")
 
 
 else:

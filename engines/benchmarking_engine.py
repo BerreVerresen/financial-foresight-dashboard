@@ -10,6 +10,19 @@ import os
 # Import sibling module (relative import for package compatibility)
 from .financial_analytics import FinancialAnalyticsEngine
 
+# Currency subsystem (degrade gracefully if unavailable so the engine never breaks)
+try:
+    from .currency import convert_value, resolve_company_currencies
+    _CURRENCY_OK = True
+except Exception:  # pragma: no cover
+    _CURRENCY_OK = False
+
+    def resolve_company_currencies(meta):
+        return None, None
+
+    def convert_value(*args, **kwargs):
+        return None, None
+
 class BenchmarkingEngine:
     """
     Calculates standardized KPIs for a cohort of companies and computes aggregate statistics.
@@ -19,10 +32,16 @@ class BenchmarkingEngine:
     def __init__(self):
         self.financial_engine = FinancialAnalyticsEngine()
 
-    def run_benchmark(self, tickers: List[str], detailed: bool = False) -> Dict[str, Any]:
+    def run_benchmark(self, tickers: List[str], detailed: bool = False,
+                      fx_signature=None, target_currency=None) -> Dict[str, Any]:
         """
         Main entry point: Fetches data, calculates KPIs, and aggregates stats.
         If detailed=True, includes the full Universal Extraction data for each company.
+
+        ``fx_signature`` is the hashable FX-config key (provider order + manual
+        overrides) used for the intra-company (ADR) currency correction. The display
+        layer handles target-currency conversion, so ``target_currency`` is recorded
+        for provenance only.
         """
         print(f"\n[BENCHMARK ENGINE] Starting analysis for cohort: {tickers}")
         
@@ -37,7 +56,7 @@ class BenchmarkingEngine:
                     continue
                 
                 # 2. Calculate KPIs
-                kpis = self._calculate_company_kpis(ticker, raw_data)
+                kpis = self._calculate_company_kpis(ticker, raw_data, fx_signature=fx_signature)
                 
                 # 3. Append to Results
                 result_entry = kpis # kpis is { "ticker": ..., "metrics": ... }
@@ -53,7 +72,7 @@ class BenchmarkingEngine:
 
         # 3. Compute Cohort Stats
         cohort_stats = self._compute_cohort_stats(company_results)
-        
+
         final_output = {
             "meta": {
                 "cohort": tickers,
@@ -61,12 +80,53 @@ class BenchmarkingEngine:
                 "count": len(company_results)
             },
             "cohort_stats": cohort_stats,
+            "currency": self._build_currency_report(company_results, target_currency),
             "companies": company_results
         }
-        
+
         return final_output
 
-    def _calculate_company_kpis(self, ticker: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    def _build_currency_report(self, results: List[Dict[str, Any]], target_currency) -> Dict[str, Any]:
+        """
+        Aggregate per-company currency metadata into a cohort-level report that
+        drives the UI flags: which currencies are present, which companies are
+        ADR-style mismatches, which are degraded (FX unavailable), and the FX rates
+        actually used for the intra-company corrections.
+        """
+        distinct: Dict[str, List[str]] = {}
+        mismatched: List[str] = []
+        degraded: List[str] = []
+        rates_used: List[Dict[str, Any]] = []
+        seen_pairs = set()
+
+        for r in results:
+            cur = r.get("currencies", {}) or {}
+            fin = cur.get("financial")
+            if fin:
+                distinct.setdefault(fin, []).append(r["ticker"])
+            if cur.get("mismatch"):
+                mismatched.append(r["ticker"])
+            if cur.get("degraded"):
+                degraded.append(r["ticker"])
+            if cur.get("fx_used") and cur.get("trading") and cur.get("financial"):
+                pair = (cur["trading"], cur["financial"])
+                if pair not in seen_pairs:
+                    seen_pairs.add(pair)
+                    rates_used.append({
+                        "from": pair[0], "to": pair[1], "rate": cur["fx_used"],
+                        "as_of": cur.get("fx_as_of"), "source": cur.get("fx_source"),
+                    })
+
+        return {
+            "target_currency": target_currency,
+            "distinct_currencies": distinct,
+            "mixed_cohort": len(distinct) > 1,
+            "intra_company_mismatch": mismatched,
+            "degraded": degraded,
+            "rates_used": rates_used,
+        }
+
+    def _calculate_company_kpis(self, ticker: str, data: Dict[str, Any], fx_signature=None) -> Dict[str, Any]:
         """
         Derives standard financial metrics from the raw Universal Extraction data.
         """
@@ -190,18 +250,46 @@ class BenchmarkingEngine:
         
         # Safe Metadata Extraction (Handle None values explicitly)
         mkt_cap = meta.get("marketCap") or meta.get("market_cap") or 0
-        
-        # Enterprise Value
+
+        # --- Currency resolution + intra-company (ADR) correction ---
+        # marketCap is in the TRADING currency (meta['currency']); statement items
+        # (net debt, dividends, buybacks, EBITDA) are in the REPORTING currency
+        # (meta['financialCurrency']). For ADRs / dual-listings these differ, which
+        # silently corrupts EV/EBITDA and Shareholder Yield. We convert marketCap
+        # into the reporting currency first so the ratios share one currency.
+        financial_ccy, trading_ccy = resolve_company_currencies(meta)
+        mismatch = bool(financial_ccy and trading_ccy and financial_ccy != trading_ccy)
+        fx_used = fx_as_of = fx_source = None
+        currency_degraded = False
+        degraded_reason = None
+
+        mkt_cap_fin = mkt_cap  # market cap expressed in the reporting currency
+        if mismatch and mkt_cap:
+            converted, rate = convert_value(mkt_cap, trading_ccy, financial_ccy, fx_signature)
+            if converted is not None:
+                mkt_cap_fin = converted
+                if rate:
+                    fx_used = rate.get("rate")
+                    fx_as_of = rate.get("as_of")
+                    fx_source = rate.get("source")
+            else:
+                # Rate unavailable: fall back to the (mixed) raw value but flag it.
+                currency_degraded = True
+                degraded_reason = "FX rate unavailable for %s->%s" % (trading_ccy, financial_ccy)
+        elif not financial_ccy or not trading_ccy:
+            degraded_reason = "currency metadata missing"
+
+        # Enterprise Value — now built entirely in the reporting currency.
         # Net Debt = Debt - Cash. If None, assume 0.
         net_debt_val = net_debt if net_debt is not None else 0
-        ev = mkt_cap + net_debt_val
-        
-        # P/E Ratio
+        ev = mkt_cap_fin + net_debt_val
+
+        # P/E Ratio (Yahoo delivers this as a unitless ratio — currency-neutral)
         pe_ratio = meta.get("trailingPE") or meta.get("forwardPE") or 0.0
 
         ev_ebitda = safe_div(ev, ebitda)
 
-        shareholder_yield = safe_div((dividends + buybacks), mkt_cap)
+        shareholder_yield = safe_div((dividends + buybacks), mkt_cap_fin)
 
         return {
             "ticker": ticker,
@@ -280,8 +368,26 @@ class BenchmarkingEngine:
                 
                 # Valuations
                 "EV/EBITDA": round(ev_ebitda, 1),
-                "P/E Ratio": round(pe_ratio if pe_ratio else 0.0, 1)
-            }
+                "P/E Ratio": round(pe_ratio if pe_ratio else 0.0, 1),
+
+                # Absolute monetary values in NATIVE currency (reporting currency,
+                # except Market Cap which is in the trading currency). The display
+                # layer converts these to the user-chosen target currency.
+                "Net Income ($B)": round(net_income / 1e9, 2),
+                "EBITDA ($B)": round(ebitda / 1e9, 2),
+                "Enterprise Value ($B)": round(ev / 1e9, 2),
+                "Market Cap ($B)": round(mkt_cap / 1e9, 2),
+            },
+            "currencies": {
+                "financial": financial_ccy,
+                "trading": trading_ccy,
+                "mismatch": mismatch,
+                "fx_used": fx_used,
+                "fx_as_of": fx_as_of,
+                "fx_source": fx_source,
+                "degraded": currency_degraded,
+                "degraded_reason": degraded_reason,
+            },
         }
 
     def _compute_cohort_stats(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
