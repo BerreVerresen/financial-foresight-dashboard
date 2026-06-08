@@ -528,107 +528,167 @@ def company_color_map(tickers):
     return {t: palette[i % len(palette)] for i, t in enumerate(tickers)}
 
 
-def cohort_years(companies_subset, n=5):
-    """Last `n` calendar years for which ANY selected company has statement data."""
-    yrs = set()
-    for c in companies_subset:
-        annual = (c.get('raw_data', {}) or {}).get('financials', {}).get('annual', {}) or {}
-        for stmt in annual.values():
-            if isinstance(stmt, dict):
-                for series in stmt.values():
-                    if isinstance(series, dict):
-                        for d in series.keys():
-                            ds = str(d)
-                            if re.match(r'^\d{4}-\d{2}-\d{2}', ds):
-                                yrs.add(ds[:4])
-    return sorted(yrs)[-n:]
+class _SeriesComputer:
+    """Per-company time series over the company's OWN statement dates. Missing
+    values are None (a gap), never a fabricated 0."""
+
+    def __init__(self, dates, fn):
+        self.dates = dates          # this company's actual YYYY-MM-DD period-ends
+        self._fn = fn
+
+    def series(self, metric):
+        return self._fn(metric)     # -> {date: value or None}
 
 
-def make_series_computer(company, year_buckets, saved_kpis=None):
-    """Return get_series(metric) -> list aligned to `year_buckets` (None where the
-    company has no data that year). Handles built-in KPIs, saved custom-KPI
-    formulas, and raw statement line items. Values are NATIVE currency."""
+def make_series_computer(company, n_periods=5, saved_kpis=None):
+    """Build a per-company series computer keyed on the company's ACTUAL reporting
+    dates (fiscal year-ends differ between companies/countries). Handles built-in
+    KPIs, saved custom-KPI formulas and raw statement line items. Any missing input
+    yields None (gap) rather than 0. Values are NATIVE currency."""
     saved_kpis = saved_kpis or {}
     annual = (company.get('raw_data', {}) or {}).get('financials', {}).get('annual', {}) or {}
     inc = annual.get('income_statement', {}) or {}
     bs = annual.get('balance_sheet', {}) or {}
     cf = annual.get('cash_flow', {}) or {}
 
-    # Map each calendar year -> this company's actual statement date key.
-    ykey = {}
+    dset = set()
     for stmt in (inc, bs, cf):
         for series in stmt.values():
             if isinstance(series, dict):
                 for d in series.keys():
                     ds = str(d)
                     if re.match(r'^\d{4}-\d{2}-\d{2}', ds):
-                        ykey.setdefault(ds[:4], ds)
+                        dset.add(ds)
+    dates = sorted(dset)[-n_periods:]
 
     def gv(stmt, keys, dk):
         if isinstance(keys, str):
             keys = [keys]
         for k in keys:
             if k in stmt and stmt[k] and dk in stmt[k]:
-                return stmt[k][dk]
+                val = stmt[k][dk]
+                if val is not None:
+                    return val
         norm = {k.lower().replace(" ", ""): k for k in stmt.keys()}
         for k in keys:
             kk = k.lower().replace(" ", "")
             if kk in norm:
                 rk = norm[kk]
                 if rk in stmt and stmt[rk] and dk in stmt[rk]:
-                    return stmt[rk][dk]
+                    val = stmt[rk][dk]
+                    if val is not None:
+                        return val
         return None
 
-    def sd(a, b):
+    def rt(a, b, scale=1.0):
+        """Ratio that returns None (not 0) when either side is missing or denom==0."""
         if a is None or b is None or b == 0:
             return None
-        return a / b
+        return (a / b) * scale
 
     REV = ["Total Revenue", "TotalRevenue", "Operating Revenue", "Revenue"]
     EQ = ["Stockholders Equity", "Total Equity Gross Minority Interest"]
     CASH = ["Cash And Cash Equivalents", "CashAndCashEquivalents"]
+    CL = ["Current Liabilities", "Total Current Liabilities"]
+    CA = ["Current Assets", "Total Current Assets"]
+    NI = ["Net Income", "NetIncome"]
+    EBITDA = ["EBITDA", "Normalized EBITDA"]
+    EBIT = ["EBIT", "Operating Income"]
+    TA = ["Total Assets", "TotalAssets"]
+
+    def abs_b(field):
+        def fn(dk):
+            v = gv(inc, field, dk)
+            return v / 1e9 if v is not None else None
+        return fn
+
+    def gross_margin(dk):
+        rev = gv(inc, REV, dk)
+        gp = gv(inc, ["Gross Profit", "GrossProfit"], dk)
+        cogs = gv(inc, "Cost Of Revenue", dk)
+        if gp is not None and rev is not None:
+            return rt(gp, rev, 100)
+        if rev is not None and cogs is not None:
+            return rt(rev - cogs, rev, 100)
+        return None
+
+    def quick_ratio(dk):
+        ca = gv(bs, CA, dk)
+        cl = gv(bs, CL, dk)
+        if ca is None or cl is None:
+            return None
+        inv = gv(bs, "Inventory", dk) or 0
+        return rt(ca - inv, cl)
+
+    def ccc(dk):
+        cogs = gv(inc, "Cost Of Revenue", dk)
+        rev = gv(inc, REV, dk)
+        if cogs is None or rev is None:
+            return None
+        inv = gv(bs, "Inventory", dk) or 0
+        rec = gv(bs, ["Receivables", "Accounts Receivable"], dk) or 0
+        ap = gv(bs, ["Accounts Payable", "Payables"], dk) or 0
+        return (rt(inv, cogs, 365) or 0) + (rt(rec, rev, 365) or 0) - (rt(ap, cogs, 365) or 0)
+
+    def nd_ebitda(dk):
+        e = gv(inc, EBITDA, dk)
+        if e is None:
+            return None
+        nd = gv(bs, "Net Debt", dk)
+        if nd is None:
+            debt = gv(bs, "Total Debt", dk)
+            if debt is None:
+                return None
+            nd = debt - (gv(bs, CASH, dk) or 0)
+        return rt(nd, e)
+
+    def roic(dk):
+        ebit = gv(inc, EBIT, dk)
+        eq = gv(bs, EQ, dk)
+        debt = gv(bs, "Total Debt", dk)
+        if ebit is None or (eq is None and debt is None):
+            return None
+        ic = (eq or 0) + (debt or 0) - (gv(bs, CASH, dk) or 0)
+        return rt(ebit * 0.79, ic, 100)
+
     mc = {
-        "Revenue ($B)": lambda dk: (gv(inc, REV, dk) or 0) / 1e9,
-        "Net Income ($B)": lambda dk: (gv(inc, ["Net Income", "NetIncome"], dk) or 0) / 1e9,
-        "EBITDA ($B)": lambda dk: (gv(inc, ["EBITDA", "Normalized EBITDA"], dk) or 0) / 1e9,
-        "Gross Margin %": lambda dk: (sd((gv(inc, REV, dk) or 0) - (gv(inc, "Cost Of Revenue", dk) or 0), gv(inc, REV, dk)) or 0) * 100,
-        "EBITDA Margin %": lambda dk: (sd(gv(inc, ["EBITDA", "Normalized EBITDA"], dk), gv(inc, REV, dk)) or 0) * 100,
-        "Net Margin %": lambda dk: (sd(gv(inc, ["Net Income", "NetIncome"], dk), gv(inc, REV, dk)) or 0) * 100,
-        "Operating Margin %": lambda dk: (sd(gv(inc, ["Operating Income", "OperatingIncome"], dk), gv(inc, REV, dk)) or 0) * 100,
-        "Current Ratio": lambda dk: sd(gv(bs, ["Current Assets", "Total Current Assets"], dk), gv(bs, ["Current Liabilities", "Total Current Liabilities"], dk)) or 0,
-        "Quick Ratio": lambda dk: sd((gv(bs, ["Current Assets", "Total Current Assets"], dk) or 0) - (gv(bs, "Inventory", dk) or 0), gv(bs, ["Current Liabilities", "Total Current Liabilities"], dk)) or 0,
-        "Debt / Equity": lambda dk: sd(gv(bs, "Total Debt", dk), gv(bs, EQ, dk)) or 0,
-        "ROE %": lambda dk: (sd(gv(inc, ["Net Income", "NetIncome"], dk), gv(bs, EQ, dk)) or 0) * 100,
-        "ROA %": lambda dk: (sd(gv(inc, ["Net Income", "NetIncome"], dk), gv(bs, ["Total Assets", "TotalAssets"], dk)) or 0) * 100,
-        "Asset Turnover": lambda dk: sd(gv(inc, REV, dk), gv(bs, ["Total Assets", "TotalAssets"], dk)) or 0,
-        "CCC (Days)": lambda dk: (
-            (sd(gv(bs, "Inventory", dk), gv(inc, "Cost Of Revenue", dk)) or 0) * 365 +
-            (sd(gv(bs, ["Receivables", "Accounts Receivable"], dk), gv(inc, REV, dk)) or 0) * 365 -
-            (sd(gv(bs, ["Accounts Payable", "Payables"], dk), gv(inc, "Cost Of Revenue", dk)) or 0) * 365),
-        "Net Debt / EBITDA": lambda dk: sd((gv(bs, "Net Debt", dk) or ((gv(bs, "Total Debt", dk) or 0) - (gv(bs, CASH, dk) or 0))), gv(inc, ["EBITDA", "Normalized EBITDA"], dk)) or 0,
-        "Interest Coverage": lambda dk: sd(gv(inc, ["EBIT", "Operating Income"], dk), gv(inc, "Interest Expense", dk)) or 0,
-        "ROIC %": lambda dk: (sd((gv(inc, ["EBIT", "Operating Income"], dk) or 0) * 0.79, (gv(bs, EQ, dk) or 0) + (gv(bs, "Total Debt", dk) or 0) - (gv(bs, CASH, dk) or 0)) or 0) * 100,
-        "DIO (Days)": lambda dk: (sd(gv(bs, "Inventory", dk), gv(inc, "Cost Of Revenue", dk)) or 0) * 365,
-        "DSO (Days)": lambda dk: (sd(gv(bs, ["Receivables", "Accounts Receivable"], dk), gv(inc, REV, dk)) or 0) * 365,
-        "DPO (Days)": lambda dk: (sd(gv(bs, ["Accounts Payable", "Payables"], dk), gv(inc, "Cost Of Revenue", dk)) or 0) * 365,
+        "Revenue ($B)": abs_b(REV),
+        "Net Income ($B)": abs_b(NI),
+        "EBITDA ($B)": abs_b(EBITDA),
+        "Gross Margin %": gross_margin,
+        "EBITDA Margin %": lambda dk: rt(gv(inc, EBITDA, dk), gv(inc, REV, dk), 100),
+        "Net Margin %": lambda dk: rt(gv(inc, NI, dk), gv(inc, REV, dk), 100),
+        "Operating Margin %": lambda dk: rt(gv(inc, EBIT, dk), gv(inc, REV, dk), 100),
+        "Current Ratio": lambda dk: rt(gv(bs, CA, dk), gv(bs, CL, dk)),
+        "Quick Ratio": quick_ratio,
+        "Debt / Equity": lambda dk: rt(gv(bs, "Total Debt", dk), gv(bs, EQ, dk)),
+        "ROE %": lambda dk: rt(gv(inc, NI, dk), gv(bs, EQ, dk), 100),
+        "ROA %": lambda dk: rt(gv(inc, NI, dk), gv(bs, TA, dk), 100),
+        "Asset Turnover": lambda dk: rt(gv(inc, REV, dk), gv(bs, TA, dk)),
+        "CCC (Days)": ccc,
+        "Net Debt / EBITDA": nd_ebitda,
+        "Interest Coverage": lambda dk: rt(gv(inc, EBIT, dk), gv(inc, "Interest Expense", dk)),
+        "ROIC %": roic,
+        "DIO (Days)": lambda dk: rt(gv(bs, "Inventory", dk), gv(inc, "Cost Of Revenue", dk), 365),
+        "DSO (Days)": lambda dk: rt(gv(bs, ["Receivables", "Accounts Receivable"], dk), gv(inc, REV, dk), 365),
+        "DPO (Days)": lambda dk: rt(gv(bs, ["Accounts Payable", "Payables"], dk), gv(inc, "Cost Of Revenue", dk), 365),
     }
 
     def var_at(name, dk, stack):
         if name in stack:
-            return 0
+            return None
         if name in mc:
             try:
-                v = mc[name](dk)
-                return v if v is not None else 0
+                return mc[name](dk)
             except Exception:
-                return 0
+                return None
         if name in saved_kpis:
             return formula_at(saved_kpis[name], dk, stack | {name})
         for stmt in (inc, bs, cf):
             v = gv(stmt, [name], dk)
             if v is not None:
                 return v
-        return 0
+        return None
 
     def formula_at(formula, dk, stack):
         names = []
@@ -640,60 +700,147 @@ def make_series_computer(company, year_buckets, saved_kpis=None):
         for i, n in enumerate(names):
             ph = f"__v{i}__"
             expr = expr.replace(f"'{n}'", ph)
-            ctx[ph] = var_at(n, dk, stack)
+            val = var_at(n, dk, stack)
+            if val is None:
+                return None  # missing input -> gap, not 0
+            ctx[ph] = val
         try:
             r = eval(expr, {"__builtins__": None}, ctx)
-            return float(r) if r is not None else 0
+            return float(r) if r is not None else None
         except Exception:
-            return 0
+            return None
+
+    def compute(metric, dk):
+        if metric in mc:
+            try:
+                v = mc[metric](dk)
+            except Exception:
+                v = None
+        elif metric in saved_kpis:
+            v = formula_at(saved_kpis[metric], dk, {metric})
+        else:
+            v = None
+            for stmt in (inc, bs, cf):
+                vv = gv(stmt, [metric], dk)
+                if vv is not None:
+                    v = vv
+                    break
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return round(v, 4)
+        return None if isinstance(v, bool) else v
 
     cache = {}
 
-    def get_series(metric):
+    def series(metric):
         if metric in cache:
             return cache[metric]
-        vals = []
-        for yb in year_buckets:
-            dk = ykey.get(yb)
-            if dk is None:
-                vals.append(None)
-                continue
-            if metric in mc:
-                try:
-                    v = mc[metric](dk)
-                except Exception:
-                    v = None
-            elif metric in saved_kpis:
-                v = formula_at(saved_kpis[metric], dk, {metric})
-            else:
-                v = None
-                for stmt in (inc, bs, cf):
-                    vv = gv(stmt, [metric], dk)
-                    if vv is not None:
-                        v = vv
-                        break
-            vals.append(round(v, 4) if isinstance(v, (int, float)) and not isinstance(v, bool) else v)
-        cache[metric] = vals
-        return vals
+        out = {dk: compute(metric, dk) for dk in dates}
+        cache[metric] = out
+        return out
 
-    return get_series
+    return _SeriesComputer(dates, series)
 
 
-def metric_timeseries_frame(companies_subset, metric, years, computers, convert=True):
-    """DataFrame index=years, columns=tickers, for `metric`. Absolute money metrics
-    are converted to the display currency per company (each from its own currency)."""
+def cohort_periods(companies_subset, computers):
+    """Sorted union of the actual reporting dates across the selected companies."""
+    alld = set()
+    for c in companies_subset:
+        alld.update(computers[c['ticker']].dates)
+    return sorted(alld)
+
+
+def metric_timeseries_frame(companies_subset, metric, computers, convert=True):
+    """Wide DataFrame index=actual period-end dates (union), columns=tickers, for
+    `metric`. Missing cells are NaN (gaps), never 0. Absolute money metrics are
+    converted to the display currency per company (each from its own currency)."""
     is_abs = metric_is_absolute(metric)
+    periods = cohort_periods(companies_subset, computers)
     data = {}
     for c in companies_subset:
-        t = c['ticker']
-        series = computers[t](metric)
+        comp = computers[c['ticker']]
+        s = comp.series(metric)
+        factor = 1.0
         if is_abs and convert:
             factor, _ = display_factor(company_currency(c, 'financial'))
-            series = [(v * factor if isinstance(v, (int, float)) and not isinstance(v, bool) else v) for v in series]
-        data[t] = series
-    df = pd.DataFrame(data, index=list(years))
-    df.index.name = "Year"
+        col = []
+        for d in periods:
+            v = s.get(d)
+            if v is not None and is_abs and convert:
+                v = v * factor
+            col.append(v)
+        data[c['ticker']] = col
+    df = pd.DataFrame(data, index=periods)
+    df.index.name = "Period"
     return df
+
+
+def timeseries_long(companies_subset, metric, computers, convert=True):
+    """Long/tidy frame for charting: one row per (company, its-own period). Missing
+    values stay None so lines break (gap) and bars are omitted — no fake 0s."""
+    is_abs = metric_is_absolute(metric)
+    rows = []
+    for c in companies_subset:
+        comp = computers[c['ticker']]
+        s = comp.series(metric)
+        factor = 1.0
+        if is_abs and convert:
+            factor, _ = display_factor(company_currency(c, 'financial'))
+        for d in comp.dates:
+            v = s.get(d)
+            if v is not None and is_abs and convert:
+                v = v * factor
+            rows.append({"Period": d, "Company": c['ticker'], "Value": v})
+    df = pd.DataFrame(rows, columns=["Period", "Company", "Value"])
+    return df
+
+
+def style_timeseries_fig(fig, single, is_abs):
+    """Shared styling: full-precision hover, single-company labels, clean layout."""
+    xfmt = "%{x}" if is_abs else "%{x|%Y-%m-%d}"
+    fig.update_traces(hovertemplate="%{fullData.name} · " + xfmt + "<br>%{y:,.4f}<extra></extra>")
+    if single:
+        fig.update_traces(texttemplate="%{y:,.1f}",
+                          textposition=("outside" if is_abs else "top center"),
+                          textfont=dict(size=11))
+    fig.update_layout(
+        height=340,
+        margin=dict(l=10, r=10, t=46, b=10),
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        yaxis=dict(showgrid=True, gridcolor='rgba(128,128,128,0.15)', title=None),
+        xaxis=dict(showgrid=False, title=None),
+        showlegend=(not single),
+        legend=dict(orientation='h', yanchor='top', y=-0.18, x=0, font=dict(size=10), title=None),
+        bargap=0.2, bargroupgap=0.06,
+    )
+    return fig
+
+
+def build_timeseries_fig(companies_subset, metric, computers, cmap, focus_ticker=None):
+    """One chart for `metric`: grouped BARS for absolutes (categorical date axis,
+    uniform bars), LINES for ratios/margins (true date axis, gaps where missing)."""
+    is_abs = metric_is_absolute(metric)
+    single = len(companies_subset) == 1
+    title = metric_label(metric)
+    if is_abs:
+        # Bars: categorical axis of the actual period-end dates -> uniform bars,
+        # same-date companies grouped, no fabricated bars for missing periods.
+        df_wide = metric_timeseries_frame(companies_subset, metric, computers)
+        long_df = df_wide.reset_index().melt(id_vars="Period", var_name="Company", value_name="Value")
+        fig = px.bar(long_df, x="Period", y="Value", color="Company",
+                     barmode="group", color_discrete_map=cmap, title=title)
+        fig.update_xaxes(type="category")
+    else:
+        # Lines: true date axis at each company's own reporting dates; None -> gap.
+        long_df = timeseries_long(companies_subset, metric, computers)
+        long_df = long_df.copy()
+        long_df["Period"] = pd.to_datetime(long_df["Period"], errors="coerce")
+        fig = px.line(long_df, x="Period", y="Value", color="Company",
+                      markers=True, color_discrete_map=cmap, title=title)
+        fig.update_traces(line=dict(width=2.5), marker=dict(size=8))
+        if not single and focus_ticker is not None and focus_ticker in set(long_df["Company"]):
+            fig.update_traces(selector=dict(name=focus_ticker), line=dict(width=4.5))
+    return style_timeseries_fig(fig, single, is_abs)
 
 
 # -------------------------------------------------------------------------
@@ -949,7 +1096,9 @@ if 'data' in st.session_state:
         else:
             # --- Over Time View (multi-company) ---
             st.caption(
-                "📈 KPIs computed from annual financial statements. "
+                "📈 KPIs plotted at each company's **actual fiscal period-end dates** "
+                "(reporting dates differ across companies/countries); missing values are shown "
+                "as **gaps, not zeros**. "
                 + (f"Absolute figures (Revenue, Net Income, EBITDA) converted to **{target_currency}** per company at the latest FX rate; ratios are currency-neutral."
                    if target_currency != "NATIVE"
                    else "Absolute figures shown in each company's native currency.")
@@ -966,15 +1115,14 @@ if 'data' in st.session_state:
                 ot_selected = [focus_ticker]
 
             sel_companies = [c for c in companies if c['ticker'] in ot_selected]
-            years = cohort_years(sel_companies)
+            saved_kpis = st.session_state.get('saved_sandbox_kpis', {})
+            computers = {c['ticker']: make_series_computer(c, 5, saved_kpis) for c in sel_companies}
+            periods = cohort_periods(sel_companies, computers)
 
-            if not years:
+            if not periods:
                 st.warning("No annual statement data available for time series.")
             else:
-                saved_kpis = st.session_state.get('saved_sandbox_kpis', {})
-                computers = {c['ticker']: make_series_computer(c, years, saved_kpis) for c in sel_companies}
                 cmap = company_color_map(ticker_list)
-                single = len(sel_companies) == 1
 
                 computable = [m for m in metrics_to_show if (m in OVERTIME_METRICS or m in saved_kpis)]
                 skipped = [m for m in metrics_to_show if m not in computable]
@@ -989,55 +1137,12 @@ if 'data' in st.session_state:
                     ts_cols = st.columns(len(row_metrics))
                     for t_idx, metric in enumerate(row_metrics):
                         with ts_cols[t_idx]:
-                            df_m = metric_timeseries_frame(sel_companies, metric, years, computers)
-                            is_abs = metric_is_absolute(metric)
-                            title = metric_label(metric)
+                            df_m = metric_timeseries_frame(sel_companies, metric, computers)
+                            if df_m.dropna(how="all").empty:
+                                st.caption(f"No data available for {metric_label(metric)}.")
+                                continue
 
-                            long_df = df_m.reset_index().melt(
-                                id_vars="Year", var_name="Company", value_name="Value")
-
-                            if is_abs:
-                                # Bar chart: magnitude differences don't distort a categorical bar
-                                fig_ts = px.bar(
-                                    long_df, x="Year", y="Value", color="Company",
-                                    barmode="group", color_discrete_map=cmap, title=title,
-                                )
-                            else:
-                                # Line chart for ratios / margins (% and x multiples)
-                                fig_ts = px.line(
-                                    long_df, x="Year", y="Value", color="Company",
-                                    markers=True, color_discrete_map=cmap, title=title,
-                                )
-                                fig_ts.update_traces(line=dict(width=2.5), marker=dict(size=8))
-                                if not single and focus_ticker in df_m.columns:
-                                    fig_ts.update_traces(selector=dict(name=focus_ticker),
-                                                         line=dict(width=4.5))
-
-                            # Full-precision value on hover (no abbreviation)
-                            fig_ts.update_traces(
-                                hovertemplate="%{fullData.name} · %{x}<br>%{y:,.4f}<extra></extra>")
-
-                            # Inline value labels only when a single company is shown
-                            if single:
-                                only = sel_companies[0]['ticker']
-                                labels = [("" if v is None else f"{v:,.1f}") for v in df_m[only].tolist()]
-                                fig_ts.update_traces(
-                                    text=labels,
-                                    textposition=("outside" if is_abs else "top center"),
-                                    textfont=dict(size=11))
-
-                            fig_ts.update_layout(
-                                height=340,
-                                margin=dict(l=10, r=10, t=46, b=10),
-                                paper_bgcolor='rgba(0,0,0,0)',
-                                plot_bgcolor='rgba(0,0,0,0)',
-                                yaxis=dict(showgrid=True, gridcolor='rgba(128,128,128,0.15)', title=None),
-                                xaxis=dict(type='category', showgrid=False, title=None),  # categorical -> no 2022.5 ticks
-                                showlegend=(not single),
-                                legend=dict(orientation='h', yanchor='top', y=-0.18, x=0,
-                                            font=dict(size=10), title=None),
-                                bargap=0.25, bargroupgap=0.05,
-                            )
+                            fig_ts = build_timeseries_fig(sel_companies, metric, computers, cmap, focus_ticker)
                             st.plotly_chart(fig_ts, use_container_width=True)
 
                             with st.expander("📋 Data table (copy / download)", expanded=False):
@@ -1639,7 +1744,7 @@ if 'data' in st.session_state:
                         # Each company converted from its own reporting currency.
                         _ccy_c = company_currency(c, "financial")
                         _cf, _shown_c = display_factor(_ccy_c)
-                        vals = [((series[d] * _cf / 1e9) if series[d] is not None else 0) for d in dates]
+                        vals = [((series[d] * _cf / 1e9) if series[d] is not None else None) for d in dates]
                         # Use year labels
                         years = [d[:4] if len(d) >= 4 else d for d in dates]
 
@@ -1783,29 +1888,18 @@ if 'data' in st.session_state:
                 ts_field = st.selectbox("Field (one annual KPI)", ts_options, key="export_ts_field")
                 ex_rows = st.multiselect("Companies", ticker_list, default=ticker_list, key="export_ts_rows")
                 sel = [c for c in companies if c['ticker'] in ex_rows]
-                years = cohort_years(sel)
-                if ts_field and sel and years:
-                    computers = {c['ticker']: make_series_computer(c, years, st.session_state.get('saved_sandbox_kpis', {})) for c in sel}
-                    df_ts = metric_timeseries_frame(sel, ts_field, years, computers)
+                computers = {c['ticker']: make_series_computer(c, 5, st.session_state.get('saved_sandbox_kpis', {})) for c in sel}
+                periods = cohort_periods(sel, computers) if sel else []
+                if ts_field and sel and periods:
+                    df_ts = metric_timeseries_frame(sel, ts_field, computers)
                     st.dataframe(df_ts, use_container_width=True)
                     st.download_button("⬇️ Download CSV", df_ts.to_csv(), "export_timeseries.csv", "text/csv")
                     with st.expander("📋 Copy values (TSV — paste straight into Excel / Sheets)"):
                         st.code(df_ts.to_csv(sep='\t'), language=None)
 
-                    # Quick chart of the exported series
-                    is_abs = metric_is_absolute(ts_field)
-                    long_x = df_ts.reset_index().melt(id_vars="Year", var_name="Company", value_name="Value")
-                    cmapx = company_color_map(ticker_list)
-                    if is_abs:
-                        figx = px.bar(long_x, x="Year", y="Value", color="Company", barmode="group", color_discrete_map=cmapx, title=metric_label(ts_field))
-                    else:
-                        figx = px.line(long_x, x="Year", y="Value", color="Company", markers=True, color_discrete_map=cmapx, title=metric_label(ts_field))
-                    figx.update_traces(hovertemplate="%{fullData.name} · %{x}<br>%{y:,.4f}<extra></extra>")
-                    figx.update_layout(
-                        height=400, paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-                        xaxis=dict(type='category', title=None), yaxis=dict(title=None),
-                        legend=dict(orientation='h', y=-0.2, font=dict(size=10)),
-                    )
+                    # Quick chart of the exported series (gaps for missing periods)
+                    figx = build_timeseries_fig(sel, ts_field, computers, company_color_map(ticker_list))
+                    figx.update_layout(height=400)
                     st.plotly_chart(figx, use_container_width=True)
                 else:
                     st.info("Pick a field and at least one company.")
