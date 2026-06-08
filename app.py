@@ -56,14 +56,55 @@ st.markdown("""
 # Utilities
 # -------------------------------------------------------------------------
 
-# Import Local Engine
-from engines.benchmarking_engine import BenchmarkingEngine
-from engines.competitor_discovery import CompetitorDiscoveryEngine
-from engines.currency import (
-    convert_value, get_rate, currency_symbol, money_suffix, normalize_currency,
-    metric_is_absolute, metric_currency_field, make_signature, clear_fx_cache,
-    COMMON_CURRENCIES, DEFAULT_PROVIDER_ORDER,
-)
+# Import Local Engine.
+#
+# Streamlit runs every browser session in its own thread and re-executes this
+# script on each interaction and on hot code-reloads. If the multi-module
+# engines/* import chain is interrupted mid-flight by a concurrent rerun, Python
+# can leave a half-initialized (None) entry in sys.modules, which then surfaces
+# as a transient "KeyError: 'engines...'" in importlib on a later run. We load
+# the engine modules through a small retry that purges any broken entries and
+# re-imports cleanly, so a single contended/interrupted import can't wedge the app.
+import importlib
+import time as _time
+
+
+def _load_engine_modules(attempts=12, delay=0.12):
+    last_err = None
+    for _ in range(attempts):
+        try:
+            be = importlib.import_module("engines.benchmarking_engine")
+            cd = importlib.import_module("engines.competitor_discovery")
+            cur = importlib.import_module("engines.currency")
+            return be, cd, cur
+        except (KeyError, ImportError) as err:
+            last_err = err
+            # Drop only definitively-broken (None) engines.* entries left by an
+            # interrupted import, then retry — an in-progress import is not None,
+            # so this never pulls the rug from a concurrent loader.
+            for _name in [n for n in list(sys.modules)
+                          if (n == "engines" or n.startswith("engines."))
+                          and sys.modules.get(n) is None]:
+                sys.modules.pop(_name, None)
+            _time.sleep(delay)
+    raise last_err
+
+
+_be_mod, _cd_mod, _ccy_mod = _load_engine_modules()
+BenchmarkingEngine = _be_mod.BenchmarkingEngine
+CompetitorDiscoveryEngine = _cd_mod.CompetitorDiscoveryEngine
+convert_value = _ccy_mod.convert_value
+get_rate = _ccy_mod.get_rate
+currency_symbol = _ccy_mod.currency_symbol
+money_suffix = _ccy_mod.money_suffix
+normalize_currency = _ccy_mod.normalize_currency
+metric_is_absolute = _ccy_mod.metric_is_absolute
+metric_currency_field = _ccy_mod.metric_currency_field
+make_signature = _ccy_mod.make_signature
+clear_fx_cache = _ccy_mod.clear_fx_cache
+COMMON_CURRENCIES = _ccy_mod.COMMON_CURRENCIES
+DEFAULT_PROVIDER_ORDER = _ccy_mod.DEFAULT_PROVIDER_ORDER
+
 from dotenv import load_dotenv
 
 # Load Environment Variables
