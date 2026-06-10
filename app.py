@@ -885,6 +885,163 @@ def build_timeseries_fig(companies_subset, metric, computers, cmap, focus_ticker
 
 
 # -------------------------------------------------------------------------
+# Sandbox helpers: reporting-period selection + monetary classification
+# -------------------------------------------------------------------------
+# Raw statement line items that are NOT monetary amounts (share counts, tax rates)
+# and so must never be FX-converted. Anything else found in a statement is treated
+# as money in the company's financial (reporting) currency.
+NON_MONETARY_RAW = {
+    "Ordinary Shares Number", "Share Issued", "Treasury Shares Number",
+    "Basic Average Shares", "Diluted Average Shares",
+    "Tax Rate For Calcs",
+}
+
+_REV_ALIASES = {"Total Revenue", "TotalRevenue", "Operating Revenue", "Revenue"}
+
+
+def _company_annual(company):
+    return (company.get('raw_data', {}) or {}).get('financials', {}).get('annual', {}) or {}
+
+
+def company_statement_keys(company):
+    """Set of every annual statement line-item name for a company (inc + bs + cf)."""
+    keys = set()
+    for stmt in _company_annual(company).values():
+        if isinstance(stmt, dict):
+            keys.update(stmt.keys())
+    return keys
+
+
+def company_statement_dates(company):
+    """A company's annual reporting period-ends (YYYY-MM-DD), newest first."""
+    dset = set()
+    for stmt in _company_annual(company).values():
+        if isinstance(stmt, dict):
+            for series in stmt.values():
+                if isinstance(series, dict):
+                    for d in series.keys():
+                        ds = str(d)[:10]
+                        if re.match(r'^\d{4}-\d{2}-\d{2}$', ds):
+                            dset.add(ds)
+    return sorted(dset, reverse=True)
+
+
+def is_period_complete(company, date, min_items=8):
+    """A period is 'complete enough' if revenue is reported AND it carries a
+    reasonable number of non-empty line items. This filters out the partially
+    loaded newest column Yahoo sometimes adds (mostly zeros / None) for one ticker,
+    which would otherwise feed the analysis as a column of zeros."""
+    nonnull = 0
+    has_rev = False
+    for stmt in _company_annual(company).values():
+        if not isinstance(stmt, dict):
+            continue
+        for key, series in stmt.items():
+            if isinstance(series, dict):
+                v = series.get(date)
+                if v is not None and v != 0:
+                    nonnull += 1
+                    if key in _REV_ALIASES:
+                        has_rev = True
+    return has_rev and nonnull >= min_items
+
+
+def latest_complete_date(company):
+    """Most recent reporting date with reasonably complete data; falls back to the
+    absolute latest if none qualify (so we never return nothing)."""
+    dates = company_statement_dates(company)
+    for d in dates:
+        if is_period_complete(company, d):
+            return d
+    return dates[0] if dates else None
+
+
+def resolve_as_of(company, overrides):
+    """Reporting date to use for a company: an explicit per-ticker override when
+    set, otherwise the latest *complete* period."""
+    ov = (overrides or {}).get(company['ticker'])
+    if ov and ov != 'AUTO':
+        return ov
+    return latest_complete_date(company)
+
+
+def pick_period_value(series_dict, as_of):
+    """Value of a {date: value} statement series at ``as_of`` — exact match if
+    present, else the most recent reported date on or before it, else latest."""
+    if not isinstance(series_dict, dict):
+        return series_dict
+    keyed = {str(k)[:10]: v for k, v in series_dict.items()}
+    if as_of and keyed.get(as_of) is not None:
+        return keyed[as_of]
+    dates = sorted((k for k in keyed if re.match(r'^\d{4}-\d{2}-\d{2}$', k)), reverse=True)
+    if as_of:
+        for d in dates:
+            if d <= as_of and keyed[d] is not None:
+                return keyed[d]
+    for d in dates:
+        if keyed[d] is not None:
+            return keyed[d]
+    return None
+
+
+def raw_var_is_monetary(name, statement_keys):
+    """True if a sandbox variable is a money amount in the financial currency. Only
+    actual statement line items qualify; share counts / tax rates and any meta-derived
+    field (e.g. fullTimeEmployees) are left unconverted."""
+    if name not in statement_keys:
+        return False
+    if name in NON_MONETARY_RAW:
+        return False
+    n = name.lower()
+    if "shares" in n and any(w in n for w in ("number", "average", "issued", "outstanding")):
+        return False
+    if "tax rate" in n:
+        return False
+    return True
+
+
+def var_currency_field(var, statement_keys):
+    """Currency a sandbox variable is denominated in: 'financial' | 'trading' | None
+    (currency-neutral — ratios, counts, percentages, days)."""
+    if metric_is_absolute(var):
+        return metric_currency_field(var)
+    if raw_var_is_monetary(var, statement_keys):
+        return "financial"
+    return None
+
+
+def sandbox_lookup(company, var, as_of, computer, statement_keys):
+    """Resolve a sandbox variable to (display_value, shown_ccy, is_monetary) at the
+    chosen reporting period, FX-converted to the active display currency when it is
+    a monetary amount. Built-in KPIs, saved KPIs and raw statement items are taken
+    at ``as_of`` via the series computer; market-derived metrics (P/E, Market Cap…)
+    fall back to their latest reported value."""
+    val = None
+    try:
+        s = computer.series(var)
+        if isinstance(s, dict):
+            val = s.get(as_of)
+    except Exception:
+        val = None
+    if val is None:
+        # Market-derived metric or value missing at as_of — latest snapshot / carry-back.
+        if var in company.get('metrics', {}):
+            val = company['metrics'].get(var)
+        else:
+            raw = find_value_rec(company.get('raw_data', {}) or {}, var)
+            val = pick_period_value(raw, as_of) if isinstance(raw, dict) else raw
+    if val is None:
+        val = 0
+
+    field = var_currency_field(var, statement_keys)
+    if field is None:
+        return val, None, False
+    from_ccy = company_currency(company, field)
+    conv, shown = convert_to_display(val, from_ccy)
+    return (conv if conv is not None else val), (shown or from_ccy), True
+
+
+# -------------------------------------------------------------------------
 # Main Logic
 # -------------------------------------------------------------------------
 if st.session_state.get('run_requested', False):
@@ -1308,11 +1465,43 @@ if 'data' in st.session_state:
     with tabs[3]:
         st.subheader("🧪 Custom KPI Lab")
 
-        if data.get('currency', {}).get('mixed_cohort'):
-            st.warning("⚠️ This cohort mixes currencies. Raw statement values below are in each company's native reporting currency and are **not** FX-converted here — cross-company comparisons and currency-mixing formulas can be misleading.")
+        # Currency context — the lab now honors the sidebar display currency.
+        if target_currency != "NATIVE":
+            st.caption(f"💱 Monetary variables are shown in **{target_currency}** (change it in the sidebar '💱 Currency & FX'). Counts, ratios and percentages are currency-neutral and left unconverted.")
+        else:
+            st.caption("💱 Display currency: **Native** — monetary variables are in each company's own reporting currency. Pick a display currency in the sidebar to FX-normalize them here.")
+
+        if data.get('currency', {}).get('mixed_cohort') and target_currency == "NATIVE":
+            st.warning("⚠️ This cohort mixes currencies and you're in Native mode — raw statement values are in each company's native currency and are **not** cross-comparable. Pick a display currency in the sidebar to normalize them here.")
 
         import re
-        
+
+        # --- Reporting period: auto latest-complete year, with per-ticker override ---
+        # Per-company series computers cover built-in KPIs, saved KPIs and raw
+        # statement items at ANY reporting year; 50 periods => the full history.
+        _saved_kpis_sb = st.session_state.get('saved_sandbox_kpis', {})
+        sb_computers = {c['ticker']: make_series_computer(c, 50, _saved_kpis_sb) for c in companies}
+        sb_stmt_keys = {c['ticker']: company_statement_keys(c) for c in companies}
+        all_stmt_keys = set().union(*sb_stmt_keys.values()) if sb_stmt_keys else set()
+
+        period_overrides = {}
+        with st.expander("📅 Analysis period (per ticker)", expanded=False):
+            st.caption("Each company defaults to its latest **complete** reporting year — partially-loaded newest periods (mostly zeros) are skipped automatically. Override any ticker below.")
+            for c in companies:
+                t = c['ticker']
+                _dates = company_statement_dates(c)
+                _auto_d = latest_complete_date(c)
+                _options = ['AUTO'] + _dates
+
+                def _fmt_period(d, _auto=_auto_d):
+                    return f"Auto — latest complete ({_auto or 'n/a'})" if d == 'AUTO' else d
+
+                period_overrides[t] = st.selectbox(
+                    f"{t}", options=_options, format_func=_fmt_period, key=f"period_ov_{t}"
+                )
+        st.session_state['sandbox_period_overrides'] = period_overrides
+        as_of_map = {c['ticker']: resolve_as_of(c, period_overrides) for c in companies}
+
         # --- Collect available variables ---
         sample_metrics = [k for k in focus_company['metrics'].keys() if k != "Profile"]
         raw_keys_inc, raw_keys_bs, raw_keys_cf = [], [], []
@@ -1344,21 +1533,31 @@ if 'data' in st.session_state:
         )
         
         if selected_vars:
-            # Build side-by-side comparison table
+            # Build side-by-side comparison table (FX-converted, at each ticker's period)
             comparison_rows = []
             for c_item in companies:
-                row = {"Ticker": c_item['ticker']}
+                t = c_item['ticker']
+                as_of = as_of_map[t]
+                row = {"Ticker": t, "Period": as_of or "—"}
                 for var_name in selected_vars:
-                    val = get_value_for_ticker(companies, c_item['ticker'], var_name)
+                    val, _ccy, _mono = sandbox_lookup(c_item, var_name, as_of, sb_computers[t], sb_stmt_keys[t])
                     row[var_name] = val if val is not None else 0
                 comparison_rows.append(row)
-            
+
             df_comparison = pd.DataFrame(comparison_rows).set_index("Ticker")
+            _num_cols = [col for col in df_comparison.columns if col != "Period"]
             st.dataframe(
-                df_comparison.style.format("{:,.2f}").background_gradient(cmap="Blues", axis=0),
+                df_comparison.style
+                    .format({col: "{:,.2f}" for col in _num_cols})
+                    .background_gradient(cmap="Blues", axis=0, subset=_num_cols),
                 use_container_width=True
             )
-            
+            _mono_vars = [v for v in selected_vars if var_currency_field(v, all_stmt_keys)]
+            if target_currency != "NATIVE" and _mono_vars:
+                st.caption(f"💱 Monetary variables ({', '.join(_mono_vars)}) shown in **{target_currency}**. **Period** = reporting year used per company (set under 📅 Analysis period).")
+            else:
+                st.caption("**Period** = reporting year used per company (set under 📅 Analysis period).")
+
             # Show formatted names for copy-paste
             st.caption("**Copy these into your formula** (single-quoted variable names):")
             formula_parts = "  ".join([f"`'{v}'`" for v in selected_vars])
@@ -1404,14 +1603,16 @@ if 'data' in st.session_state:
                 
                 for c_item in companies:
                     safe_eval_dict = {}
-                    
+                    t = c_item['ticker']
+                    as_of = as_of_map[t]
+
                     for v_name in needed_vars:
-                        val = get_value_for_ticker(companies, c_item['ticker'], v_name)
+                        val, _ccy, _mono = sandbox_lookup(c_item, v_name, as_of, sb_computers[t], sb_stmt_keys[t])
                         safe_eval_dict[v_name] = val if val is not None else 0
-                        
+
                         if v_name not in input_var_data:
                             input_var_data[v_name] = []
-                        input_var_data[v_name].append({"Ticker": c_item['ticker'], "Value": val if val is not None else 0})
+                        input_var_data[v_name].append({"Ticker": t, "Value": val if val is not None else 0})
                     
                     eval_formula = formula
                     eval_context = {"abs": abs, "round": round, "min": min, "max": max}
@@ -1438,7 +1639,10 @@ if 'data' in st.session_state:
                 
                 # --- Result Chart ---
                 st.markdown(f"### 📊 Result: {metric_name}")
-                
+                _mono_inputs = [v for v in needed_vars if var_currency_field(v, all_stmt_keys)]
+                if target_currency != "NATIVE" and _mono_inputs:
+                    st.caption(f"💱 Monetary inputs ({', '.join(_mono_inputs)}) converted to **{target_currency}** before evaluating; reporting year per company set under 📅 Analysis period. The result's unit depends on your formula.")
+
                 res_c1, res_c2 = st.columns([1, 2])
                 with res_c1:
                     st.dataframe(df_res[[metric_name]], use_container_width=True)
